@@ -158,6 +158,27 @@ class TestForgery(unittest.TestCase):
             self.assertIn(c0, (0, 1))
             self.assertIn(c1, (0, 1))
 
+    def test_full_forgery_ops_differ_from_original(self):
+        """At strength=1.0, ops should be randomised — far fewer matches than bits."""
+        sig = _make_sig(n_bits=32)
+        adv = ForgeryAdversary(strength=1.0)
+        result = adv.attack(sig)
+        ops_match = sum(
+            1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f
+        )
+        # Random Pauli against random Pauli: ~25% match by chance.
+        # 32 bits → expect ~8 matches.  Assert well below half.
+        self.assertLess(ops_match, 16)
+
+    def test_forgery_detectable_via_batch(self):
+        """Forgery match rate should be well below 1.0 — M4 can catch it."""
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=8) for _ in range(20)]
+        df = run_batch(ForgeryAdversary(strength=1.0), sigs)
+        avg_ops_match = df["ops_match_rate"].mean()
+        # Random Pauli ops against random ops: ~25% per-bit match chance
+        self.assertLess(avg_ops_match, 0.5)
+
 
 # ── Channel Tamper ───────────────────────────────────────────────────────
 
