@@ -1,9 +1,19 @@
 name: CI
 
 on:
+  # Every branch, not just master. CLAUDE.md puts each track on its own
+  # branch, and someone pushing to m1-core with no PR open yet still wants
+  # to know their tests pass. A branch filter here would have meant CI ran
+  # only once a PR existed.
   push:
-    branches: [master]
   pull_request:
+
+# A push to a branch with an open PR fires both events. Keep the newer run,
+# cancel the older, so six people on six branches do not queue behind
+# duplicate work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
