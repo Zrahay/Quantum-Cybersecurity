@@ -11,8 +11,15 @@ on:
 # A push to a branch with an open PR fires both events. Keep the newer run,
 # cancel the older, so six people on six branches do not queue behind
 # duplicate work.
+#
+# github.ref differs between the two events for the SAME branch: push gives
+# refs/heads/<branch>, pull_request gives refs/pull/<PR#>/merge. Keying on
+# github.ref alone puts them in different groups and neither ever cancels
+# the other. github.head_ref is set only for pull_request (the source
+# branch name) and empty for push, so this falls through to github.ref
+# there -- same branch, same group, either way.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
