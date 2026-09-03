@@ -18,8 +18,13 @@ from typing import Protocol
 
 
 class Basis(Enum):
-    """Measurement basis. Y is here for completeness; drop it if the
-    protocol never measures in it (M2's call)."""
+    """Measurement basis.
+
+    Y is carried for completeness. If the protocol turns out never to
+    measure in it, removing it is a contract change like any other and
+    goes through the Decision Log -- not a unilateral edit, because M1's
+    basis rotation and M4's per-basis statistics both branch on this enum.
+    """
 
     Z = "Z"  # computational
     X = "X"
@@ -67,7 +72,14 @@ class Signature:
     signer_id: str
     message: tuple[int, ...]
     declared_ops: tuple[PauliOp, ...]           # correction the signer claims
-    bell_outcomes: tuple[tuple[int, int], ...]  # teleportation measurement bits
+    # BIT ORDER, FROZEN: each pair is (clbit0, clbit1) -- control qubit's
+    # bit FIRST, in circuit order. Deliberately NOT Qiskit's little-endian
+    # count-string order, which reads right-to-left; convert at the
+    # boundary in core/, not here. Bell symmetry means (0,0) and (1,1)
+    # agree either way, so a mismatch only shows on (0,1)/(1,0) -- roughly
+    # half of runs, producing wrong Pauli corrections that look exactly
+    # like channel noise. See the ordering note in core/bell.py.
+    bell_outcomes: tuple[tuple[int, int], ...]
     nonce: str                                  # freshness, replay defence
     timestamp: float
 
@@ -79,8 +91,12 @@ class MeasurementRecord:
     sig_id: str
     copy_index: int  # 0 .. L-1
     basis: Basis
-    expected: int    # eigenvalue the protocol predicts: 0 or 1
-    observed: int    # what was actually measured
+    # Both fields are MEASURED CLASSICAL BITS: 0 or 1, never the +1/-1
+    # Pauli eigenvalues. "The protocol predicts the +1 eigenstate" maps to
+    # expected=0 here. Writing -1 would make `mismatch` true for every
+    # record and reject every legitimate signature at a 100% mismatch rate.
+    expected: int    # bit the protocol predicts: 0 or 1
+    observed: int    # bit actually measured: 0 or 1
 
     @property
     def mismatch(self) -> bool:

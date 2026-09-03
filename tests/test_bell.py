@@ -74,18 +74,6 @@ class TestBellExperiment(unittest.TestCase):
                 f"produce |00⟩ or |11⟩",
             )
 
-    def test_ideal_channel_has_no_anti_correlated_outcomes(self):
-        """
-        On an IDEAL channel, |01⟩ and |10⟩ do not appear at all.
-
-        Same expiry warning as the test above: once channel noise exists,
-        these outcomes are the noise floor, not broken entanglement.
-        """
-        msg = "on a NOISELESS simulator this means the circuit is wrong; " \
-              "once a noise model exists, expect these and assert a rate instead"
-        self.assertNotIn("01", self.counts, f"Found |01⟩ — {msg}")
-        self.assertNotIn("10", self.counts, f"Found |10⟩ — {msg}")
-
     def test_total_shots_match(self):
         """The sum of all counts must equal the number of shots."""
         self.assertEqual(self.total_shots, SHOTS)
@@ -94,12 +82,22 @@ class TestBellExperiment(unittest.TestCase):
         """
         |00⟩ and |11⟩ should each appear close to 50% of the time.
 
-        Bound derivation, so it is defensible rather than eyeballed: for a
-        fair binomial at n=4096, sigma = sqrt(n*p*(1-p)) = 32 shots, which
-        is 0.78 percentage points. A 3-sigma band is +/- 2.34pp, giving a
-        false-failure rate near 0.3% — tight enough to catch a real skew,
-        loose enough not to flake. The previous +/- 15pp band was 19 sigma:
-        it could not fail for statistical reasons, only for total breakage.
+        The bound is SIZED by statistics but the draw is DETERMINISTIC —
+        be clear about which. With SEED fixed this is a regression guard on
+        one known-good draw, not a hypothesis test: it passes or fails
+        identically forever, so quoting a false-failure rate for it would
+        be meaningless.
+
+        The sizing still matters. For a fair binomial at n=4096,
+        sigma = sqrt(n*p*(1-p)) = 32 shots = 0.78pp, so a 3-sigma band is
+        +/- 2.34pp. Any change that genuinely skews the distribution — a
+        wrong gate, a mis-seeded simulator — moves the counts well outside
+        that and gets caught. The previous +/- 15pp band was 19 sigma wide
+        and would have stayed green through a 15% noise level.
+
+        If you later want real distributional power here, drop the seed and
+        average several draws. That trades reproducibility for sensitivity;
+        the structural assertions above want the seed, so keep them split.
         """
         sigma = (SHOTS * 0.5 * 0.5) ** 0.5 / SHOTS  # 0.0078125
         lo, hi = 0.5 - 3 * sigma, 0.5 + 3 * sigma

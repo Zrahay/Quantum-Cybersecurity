@@ -1,24 +1,18 @@
 """replay adversary. Track M3 (Nikita). Deliverable D4.
 
-Attacks go through M2's public API only. An adversary that reaches into
-internals proves nothing.
-
-STUB -- importable and correctly typed. Real implementation is M3's.
+STUB -- returns the signature unchanged. The detector fails closed, so an
+unimplemented attack shows as REJECT/stub on the dashboard rather than as
+a silently successful one.
 """
 
 from __future__ import annotations
 
+from attacks.base import BaseAdversary
 from contracts import Signature, ThreatType
 
 
-class ReplayAdversary:
-    name = "replay"
+class ReplayAdversary(BaseAdversary):
     threat = ThreatType.REPLAY
-
-    def __init__(self, strength: float = 1.0) -> None:
-        # Parameterised, not hardcoded -- strength as a dial is what
-        # produces the graded detection curves in Phase 4.
-        self.strength = strength
 
     def attack(self, sig: Signature) -> Signature:
         # TODO(M3): real attack.

@@ -12,9 +12,17 @@ from contracts import MeasurementRecord
 
 
 def mismatch_rate(records: list[MeasurementRecord]) -> float:
-    """Fraction of measurements disagreeing with prediction. 0.0 - 1.0."""
+    """Fraction of measurements disagreeing with prediction. 0.0 - 1.0.
+
+    Raises ValueError on an empty list. This is deliberate: a rate of 0.0
+    is the single strongest evidence of a legitimate signature, so
+    returning it for "we have no data" fails open — every forgery would
+    sail through `r < s_a`. No measurements is insufficient data, and the
+    caller must say so, exactly as chi2_uniformity below refuses to return
+    a p-value it cannot justify.
+    """
     if not records:
-        return 0.0
+        raise ValueError("no measurement records: insufficient data, not a zero mismatch rate")
     return sum(r.mismatch for r in records) / len(records)
 
 
