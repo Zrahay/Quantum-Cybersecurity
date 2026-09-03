@@ -270,5 +270,82 @@ class TestStrengthParameter(unittest.TestCase):
         self.assertGreaterEqual(high_diffs, low_diffs)
 
 
+# ── run_batch ───────────────────────────────────────────────────────────
+
+class TestRunBatch(unittest.TestCase):
+
+    def test_returns_dataframe(self):
+        import pandas as pd
+        from attacks.utils import run_batch
+        sigs = [_make_sig() for _ in range(5)]
+        df = run_batch(ForgeryAdversary(), sigs)
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertEqual(len(df), 5)
+
+    def test_expected_columns(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig() for _ in range(3)]
+        df = run_batch(ChannelTamperAdversary(), sigs)
+        expected = {
+            "trial_id", "attack_type", "strength",
+            "original_sig_id", "tampered_sig_id", "n_bits",
+            "nonce_changed", "key_id_changed", "signer_id_changed",
+            "ops_changed", "ops_diff_count", "ops_match_rate",
+            "outcomes_changed", "outcomes_diff_count", "outcomes_match_rate",
+        }
+        self.assertTrue(expected.issubset(set(df.columns)))
+
+    def test_attack_type_matches(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig() for _ in range(3)]
+        for adv, expected_type in [
+            (ForgeryAdversary(), "forgery"),
+            (ReplayAdversary(), "replay"),
+            (ChannelTamperAdversary(), "channel_tamper"),
+            (ImpersonationAdversary(), "impersonation"),
+        ]:
+            df = run_batch(adv, sigs)
+            self.assertTrue(
+                (df["attack_type"] == expected_type).all(),
+                f"Expected {expected_type}, got {df['attack_type'].tolist()}",
+            )
+
+    def test_trial_ids_sequential(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig() for _ in range(8)]
+        df = run_batch(ForgeryAdversary(), sigs)
+        self.assertEqual(list(df["trial_id"]), list(range(8)))
+
+    def test_replay_does_not_change_ops(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig() for _ in range(5)]
+        df = run_batch(ReplayAdversary(), sigs)
+        self.assertFalse(df["ops_changed"].any())
+        self.assertFalse(df["outcomes_changed"].any())
+
+    def test_forgery_changes_ops_and_outcomes(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=8) for _ in range(10)]
+        df = run_batch(ForgeryAdversary(), sigs)
+        self.assertTrue(df["ops_changed"].any())
+        self.assertTrue(df["outcomes_changed"].any())
+
+    def test_channel_tamper_changes_outcomes_not_ops(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=8) for _ in range(10)]
+        df = run_batch(ChannelTamperAdversary(strength=1.0), sigs)
+        self.assertFalse(df["ops_changed"].any())
+        self.assertTrue(df["outcomes_changed"].any())
+
+    def test_match_rate_between_zero_and_one(self):
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=8) for _ in range(10)]
+        df = run_batch(ForgeryAdversary(), sigs)
+        self.assertTrue((df["ops_match_rate"] >= 0.0).all())
+        self.assertTrue((df["ops_match_rate"] <= 1.0).all())
+        self.assertTrue((df["outcomes_match_rate"] >= 0.0).all())
+        self.assertTrue((df["outcomes_match_rate"] <= 1.0).all())
+
+
 if __name__ == "__main__":
     unittest.main()
