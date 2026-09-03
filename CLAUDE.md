@@ -39,15 +39,15 @@ At the end of a work session, append a dated entry to your track's Notion page.
 
 Six people, six modules. Stay in your own unless you have agreed otherwise.
 
-| Module | Track | Owns |
-|---|---|---|
-| `core/` | M1 Quantum Core | Bell pairs, teleportation, Pauli corrections, channel noise |
-| `protocol/` | M2 QDS Protocol | keygen, sign, verify, the D1 maths model |
-| `attacks/` | M3 Attack Simulator | the four adversaries |
-| `detection/` | M4 Detection Engine | thresholds, Hoeffding bound, chi-square, classification |
-| `app/` | M5 Dashboard | Streamlit UI, event log, plots |
-| `docs/`, `bench/` | M6 Docs and Benchmarks | documentation, deck, metrics |
-| `contracts.py` | shared | frozen dataclasses — see below |
+| Module | Track | Owner | Owns |
+|---|---|---|---|
+| `core/` | M1 Quantum Core | Ashab | Bell pairs, teleportation, Pauli corrections, channel noise |
+| `protocol/` | M2 QDS Protocol | Shubhang | keygen, sign, verify, the D1 maths model |
+| `attacks/` | M3 Attack Simulator | Nikita | the four adversaries |
+| `detection/` | M4 Detection Engine | Hemang | thresholds, Hoeffding bound, chi-square, classification |
+| `app/` | M5 Dashboard | Yuvraj | Streamlit UI, event log, plots |
+| `docs/`, `bench/` | M6 Docs and Benchmarks | Anurag | documentation, deck, metrics |
+| `contracts.py` | shared | — | frozen dataclasses — see below |
 
 ## Stack
 
