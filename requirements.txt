@@ -1,0 +1,10 @@
+# Pinned. Resolved and test-verified 2026-09-03 on Python 3.12.
+# Adding anything here requires a Decision Log entry in Notion first --
+# the dependency list is the evidence for the "no ML" constraint, so it
+# stays short and boring. No sklearn/torch/tensorflow/keras/xgboost, ever.
+qiskit==2.5.2
+qiskit-aer==0.17.2
+numpy==2.5.2
+scipy==1.18.1
+streamlit==1.63.0
+pytest==9.1.1

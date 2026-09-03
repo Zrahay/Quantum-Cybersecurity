@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sih26141-qds"
+version = "0.1.0"
+description = "Quantum-inspired threat detection for teleportation-based QDS"
+requires-python = ">=3.12"
+
+[tool.setuptools]
+packages = ["core", "protocol", "attacks", "detection", "app"]
+py-modules = ["contracts"]
+
+[tool.pytest.ini_options]
+# Belt and braces: `pip install -e .` is the supported setup (see README),
+# but this keeps a bare `pytest` working in a fresh clone before anyone has
+# installed anything.
+pythonpath = ["."]
+testpaths = ["tests"]
