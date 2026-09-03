@@ -72,8 +72,9 @@ The dependency list is the evidence for constraint 1, so keep it short and borin
   reaches into internals proves nothing.
 - Non-trivial logic leaves one runnable check behind — a small `test_*.py` that
   fails if the logic breaks. No fixtures, no elaborate suites.
-- One branch per track (`m1-core`, `m2-protocol`, …). Merge to `main` when your
-  module works against the stubs.
+- One branch per track (`m1-core`, `m2-protocol`, …). Merge to `master` when your
+  module works against the stubs. CI runs on every branch, so you get a
+  test result before you open a PR.
 
 ## Do not
 

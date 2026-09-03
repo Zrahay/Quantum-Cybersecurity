@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  # Every branch, not just master. CLAUDE.md puts each track on its own
+  # branch, and someone pushing to m1-core with no PR open yet still wants
+  # to know their tests pass. A branch filter here would have meant CI ran
+  # only once a PR existed.
+  push:
+  pull_request:
+
+# A push to a branch with an open PR fires both events. Keep the newer run,
+# cancel the older, so six people on six branches do not queue behind
+# duplicate work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      # Installing from the pinned requirements and then installing the
+      # project editable is the documented setup. If this step breaks, the
+      # README is wrong for all six people, so let CI find that first.
+      - name: Install
+        run: |
+          pip install -r requirements.txt
+          pip install -e .
+
+      - name: Tests
+        run: pytest -q
