@@ -41,14 +41,21 @@ class ForgeryAdversary(BaseAdversary):
     threat = ThreatType.FORGERY
 
     def _run_teleport(self, message_bit: int, noise: float) -> tuple[int, int]:
-        """Run one teleportation shot and return (clbit0, clbit1)."""
+        """Run one teleportation shot and return (clbit0, clbit1).
+
+        `get_memory()` returns Qiskit's little-endian count-string order --
+        the LAST character is clbit0, not the first. Reading `bits[0]`
+        would silently grab clbit2 (Bob's measured qubit) paired with
+        clbit1, not the frozen (clbit0, clbit1) Bell-outcome convention.
+        See contracts.Signature.bell_outcomes.
+        """
         qc = teleportation_circuit(noise_level=noise)
         if message_bit:
             qc.x(0)
         qc.measure(2, 2)
         result = AerSimulator().run(qc, shots=1, memory=True).result()
         bits = result.get_memory()[0]
-        return (int(bits[0]), int(bits[1]))
+        return (int(bits[-1]), int(bits[-2]))
 
     def attack(self, sig: Signature) -> Signature:
         n = len(sig.message)

@@ -15,9 +15,6 @@ No AI/ML is used.
 
 from __future__ import annotations
 
-import random
-import uuid
-
 from qiskit_aer import AerSimulator
 
 from attacks.base import BaseAdversary
@@ -38,14 +35,19 @@ class ChannelTamperAdversary(BaseAdversary):
     threat = ThreatType.CHANNEL_TAMPER
 
     def _run_tampered_teleport(self, message_bit: int) -> tuple[int, int]:
-        """Run teleportation with Eve's noisy channel, return (c0, c1)."""
+        """Run teleportation with Eve's noisy channel, return (c0, c1).
+
+        `get_memory()` is Qiskit's little-endian count-string order -- the
+        LAST character is clbit0, not the first. See the same note on
+        ForgeryAdversary._run_teleport.
+        """
         qc = teleportation_circuit(noise_level=self.strength)
         if message_bit:
             qc.x(0)
         qc.measure(2, 2)
         result = AerSimulator().run(qc, shots=1, memory=True).result()
         bits = result.get_memory()[0]
-        return (int(bits[0]), int(bits[1]))
+        return (int(bits[-1]), int(bits[-2]))
 
     def attack(self, sig: Signature) -> Signature:
         if self.strength == 0.0:
@@ -71,6 +73,6 @@ class ChannelTamperAdversary(BaseAdversary):
             message=sig.message,
             declared_ops=sig.declared_ops,
             bell_outcomes=tampered_outcomes,
-            nonce=uuid.uuid4().hex,
+            nonce=sig.nonce,
             timestamp=sig.timestamp,
         )
