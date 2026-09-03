@@ -1,1 +1,0 @@
-# QDS verifier

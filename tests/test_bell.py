@@ -10,14 +10,14 @@ These tests verify that the Bell state circuit behaves correctly:
 No AI/ML is used. We use standard statistical thresholds.
 """
 
-import sys
-import os
 import unittest
 
-# Add the project root to the Python path so we can import src modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from core.bell import analyze_correlation, create_bell_circuit, run_bell_experiment
 
-from src.quantum.bell import create_bell_circuit, run_bell_experiment, analyze_correlation
+# Fixed seed: a failing run can be reproduced with the exact same shots
+# instead of guessed at. Matters more once noise models land.
+SEED = 20260903
+SHOTS = 4096
 
 
 class TestBellCircuit(unittest.TestCase):
@@ -50,15 +50,20 @@ class TestBellExperiment(unittest.TestCase):
     def setUpClass(cls):
         """Run the Bell experiment once for all tests in this class."""
         # Use a large number of shots for reliable statistics
-        cls.counts = run_bell_experiment(shots=4096)
+        cls.counts = run_bell_experiment(shots=SHOTS, seed=SEED)
         cls.total_shots = sum(cls.counts.values())
 
-    def test_only_correlated_outcomes(self):
+    def test_ideal_channel_produces_only_correlated_outcomes(self):
         """
-        Bell state |Φ+⟩ should only produce |00⟩ or |11⟩.
+        On an IDEAL (noiseless) channel, |Φ+⟩ produces only |00⟩ or |11⟩.
 
-        The outcomes |01⟩ and |10⟩ should NEVER appear because
-        entangled qubits always give the same measurement result.
+        NOTE — THIS INVARIANT EXPIRES. It holds only while the simulator is
+        noiseless. The next task on this track is a tunable depolarising
+        noise model, and at any noise level above zero |01⟩ and |10⟩ WILL
+        appear at roughly the noise rate. When that lands, replace this
+        assertion with a tolerance on the anti-correlated *rate* against the
+        measured noise floor. Do not "fix" a failure here by weakening the
+        circuit — a failure after noise is introduced is expected, not a bug.
         """
         allowed = {"00", "11"}
         for outcome in self.counts:
@@ -69,57 +74,42 @@ class TestBellExperiment(unittest.TestCase):
                 f"produce |00⟩ or |11⟩",
             )
 
-    def test_no_anti_correlated_outcomes(self):
+    def test_ideal_channel_has_no_anti_correlated_outcomes(self):
         """
-        Verify that |01⟩ and |10⟩ do not appear at all.
+        On an IDEAL channel, |01⟩ and |10⟩ do not appear at all.
 
-        These outcomes would indicate the qubits are NOT entangled.
+        Same expiry warning as the test above: once channel noise exists,
+        these outcomes are the noise floor, not broken entanglement.
         """
-        self.assertNotIn("01", self.counts, "Found |01⟩ — qubits are not entangled")
-        self.assertNotIn("10", self.counts, "Found |10⟩ — qubits are not entangled")
+        msg = "on a NOISELESS simulator this means the circuit is wrong; " \
+              "once a noise model exists, expect these and assert a rate instead"
+        self.assertNotIn("01", self.counts, f"Found |01⟩ — {msg}")
+        self.assertNotIn("10", self.counts, f"Found |10⟩ — {msg}")
 
     def test_total_shots_match(self):
         """The sum of all counts must equal the number of shots."""
-        self.assertEqual(self.total_shots, 4096)
-
-    def test_both_outcomes_present(self):
-        """
-        Both |00⟩ and |11⟩ should appear with reasonable frequency.
-
-        Over 4096 shots, each outcome should appear at least 5% of the time.
-        """
-        for outcome in ["00", "11"]:
-            count = self.counts.get(outcome, 0)
-            ratio = count / self.total_shots
-            self.assertGreater(
-                ratio,
-                0.05,
-                f"Outcome |{outcome}⟩ appeared only {ratio:.1%} of the time — "
-                f"expected ~50%",
-            )
+        self.assertEqual(self.total_shots, SHOTS)
 
     def test_approximately_50_50_split(self):
         """
-        The |00⟩ and |11⟩ outcomes should each appear roughly 50% of the time.
+        |00⟩ and |11⟩ should each appear close to 50% of the time.
 
-        We allow a margin of 15% (i.e., 35%-65%) because quantum measurement
-        is probabilistic. With 4096 shots, the law of large numbers ensures
-        we converge close to 50/50.
+        Bound derivation, so it is defensible rather than eyeballed: for a
+        fair binomial at n=4096, sigma = sqrt(n*p*(1-p)) = 32 shots, which
+        is 0.78 percentage points. A 3-sigma band is +/- 2.34pp, giving a
+        false-failure rate near 0.3% — tight enough to catch a real skew,
+        loose enough not to flake. The previous +/- 15pp band was 19 sigma:
+        it could not fail for statistical reasons, only for total breakage.
         """
+        sigma = (SHOTS * 0.5 * 0.5) ** 0.5 / SHOTS  # 0.0078125
+        lo, hi = 0.5 - 3 * sigma, 0.5 + 3 * sigma
         for outcome in ["00", "11"]:
-            count = self.counts.get(outcome, 0)
-            ratio = count / self.total_shots
+            ratio = self.counts.get(outcome, 0) / self.total_shots
             self.assertGreaterEqual(
-                ratio,
-                0.35,
-                f"Outcome |{outcome}⟩ appeared only {ratio:.1%} — "
-                f"expected roughly 50%",
+                ratio, lo, f"Outcome |{outcome}⟩ appeared {ratio:.2%} — expected ~50% (3-sigma floor {lo:.2%})"
             )
             self.assertLessEqual(
-                ratio,
-                0.65,
-                f"Outcome |{outcome}⟩ appeared {ratio:.1%} — "
-                f"expected roughly 50%",
+                ratio, hi, f"Outcome |{outcome}⟩ appeared {ratio:.2%} — expected ~50% (3-sigma ceiling {hi:.2%})"
             )
 
 
@@ -133,7 +123,7 @@ class TestAnalyzeCorrelation(unittest.TestCase):
         self.assertEqual(result["total_shots"], 1000)
         self.assertEqual(result["correlated"], 1000)
         self.assertEqual(result["anti_correlated"], 0)
-        self.assertAlmostEqual(result["correlation_rate"], 100.0)
+        self.assertAlmostEqual(result["correlation_rate"], 1.0)
 
     def test_partial_correlation(self):
         """Mixed correlated and anti-correlated outcomes."""
@@ -142,7 +132,7 @@ class TestAnalyzeCorrelation(unittest.TestCase):
         self.assertEqual(result["total_shots"], 1000)
         self.assertEqual(result["correlated"], 800)
         self.assertEqual(result["anti_correlated"], 200)
-        self.assertAlmostEqual(result["correlation_rate"], 80.0)
+        self.assertAlmostEqual(result["correlation_rate"], 0.8)
 
     def test_all_anti_correlated(self):
         """100% anti-correlated outcomes."""
@@ -160,7 +150,7 @@ class TestAnalyzeCorrelation(unittest.TestCase):
         self.assertEqual(result["total_shots"], 100)
         self.assertEqual(result["correlated"], 100)
         self.assertEqual(result["anti_correlated"], 0)
-        self.assertAlmostEqual(result["correlation_rate"], 100.0)
+        self.assertAlmostEqual(result["correlation_rate"], 1.0)
 
     def test_empty_counts(self):
         """An empty counts dict should not crash and should return zeros."""
@@ -177,6 +167,29 @@ class TestAnalyzeCorrelation(unittest.TestCase):
         self.assertEqual(result["total_shots"], 0)
         self.assertAlmostEqual(result["correlation_rate"], 0.0)
 
+    def test_unrecognised_keys_counted_in_total(self):
+        """
+        An outcome key that is neither correlated nor anti-correlated must
+        still count toward total_shots, and be reported separately.
+
+        This is the regression guard for a real bug: total_shots used to be
+        computed as correlated + anti_correlated, so any unexpected key was
+        silently dropped and the shot count understated. Noise models and
+        multi-register circuits both produce such keys.
+        """
+        result = analyze_correlation({"00": 10, "11": 10, "01": 5, "99": 3})
+        self.assertEqual(result["total_shots"], 28)
+        self.assertEqual(result["correlated"], 20)
+        self.assertEqual(result["anti_correlated"], 5)
+        self.assertEqual(result["unrecognised"], 3)
+        self.assertAlmostEqual(result["correlation_rate"], 20 / 28)
+
+    def test_unrecognised_is_zero_for_canonical_keys(self):
+        """The four canonical outcomes leave nothing unrecognised."""
+        result = analyze_correlation({"00": 1, "11": 2, "01": 3, "10": 4})
+        self.assertEqual(result["unrecognised"], 0)
+        self.assertEqual(result["total_shots"], 10)
+
     def test_single_outcome(self):
         """A single correlated outcome (only |00>)."""
         counts = {"00": 50}
@@ -184,7 +197,7 @@ class TestAnalyzeCorrelation(unittest.TestCase):
         self.assertEqual(result["total_shots"], 50)
         self.assertEqual(result["correlated"], 50)
         self.assertEqual(result["anti_correlated"], 0)
-        self.assertAlmostEqual(result["correlation_rate"], 100.0)
+        self.assertAlmostEqual(result["correlation_rate"], 1.0)
 
 
 if __name__ == "__main__":

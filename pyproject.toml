@@ -1,0 +1,5 @@
+[tool.pytest.ini_options]
+# Repo root on the path, so every test imports `core.bell`, `contracts`
+# etc. from any working directory -- no per-file sys.path hacks.
+pythonpath = ["."]
+testpaths = ["tests"]

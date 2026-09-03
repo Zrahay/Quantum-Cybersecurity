@@ -32,7 +32,7 @@ from qiskit_aer import AerSimulator
 
 def analyze_correlation(counts: dict[str, int]) -> dict[str, int | float]:
     """
-    Compute simple correlation statistics from measurement counts.
+    Compute correlation statistics from measurement counts.
 
     Args:
         counts: Mapping of outcome strings (e.g. "00", "11") to their counts.
@@ -40,19 +40,31 @@ def analyze_correlation(counts: dict[str, int]) -> dict[str, int | float]:
 
     Returns:
         A dictionary with:
-          - total_shots
-          - correlated   (|00> + |11>)
-          - anti_correlated (|01> + |10>)
-          - correlation_rate  (correlated / total_shots * 100, or 0 if no shots)
+          - total_shots      (sum of ALL counts, including unrecognised keys)
+          - correlated       (|00> + |11>)
+          - anti_correlated  (|01> + |10>)
+          - unrecognised     (counts under any other key)
+          - correlation_rate (correlated / total_shots, in 0.0-1.0)
+
+    `correlation_rate` is a rate, not a percentage. Everything downstream
+    (see contracts.DetectionResult.mismatch_rate) works in 0.0-1.0; mixing
+    the two conventions is a silent factor-of-100 bug waiting to happen.
+
+    `unrecognised` is a real signal, not defensive padding: once a noise
+    model lands, or a circuit gains a register, outcome keys can appear
+    that are neither correlated nor anti-correlated. Dropping them from
+    the total silently would understate the shot count.
     """
     correlated = counts.get("00", 0) + counts.get("11", 0)
     anti_correlated = counts.get("01", 0) + counts.get("10", 0)
-    total_shots = correlated + anti_correlated
-    correlation_rate = (correlated / total_shots * 100) if total_shots > 0 else 0.0
+    total_shots = sum(counts.values())
+    unrecognised = total_shots - correlated - anti_correlated
+    correlation_rate = (correlated / total_shots) if total_shots > 0 else 0.0
     return {
         "total_shots": total_shots,
         "correlated": correlated,
         "anti_correlated": anti_correlated,
+        "unrecognised": unrecognised,
         "correlation_rate": correlation_rate,
     }
 
@@ -88,18 +100,28 @@ def create_bell_circuit() -> QuantumCircuit:
 
     # Step 3: Measure both qubits into classical bits
     # qubit 0 → classical bit 0, qubit 1 → classical bit 1
+    #
+    # BIT ORDERING: Qiskit count strings are little-endian — the RIGHTMOST
+    # character is classical bit 0. So "01" means clbit1=0, clbit0=1, i.e.
+    # qubit1=0, qubit0=1 — the reverse of a naive left-to-right reading.
+    # Harmless here because "00"/"11" read the same from either end, but
+    # teleportation applies X and Z conditioned on *specific* classical
+    # bits, so getting this backwards there silently produces the wrong
+    # Pauli correction. Read this comment before writing that code.
     qc.measure([0, 1], [0, 1])
 
     return qc
 
 
-def run_bell_experiment(shots: int = 1024) -> dict:
+def run_bell_experiment(shots: int = 1024, seed: int | None = None) -> dict:
     """
     Run the Bell state circuit on a quantum simulator.
 
     Args:
         shots: Number of times to run the circuit. More shots = better
                statistics. 1024 is a standard default.
+        seed:  Optional RNG seed. Pass one from tests so a failure can be
+               reproduced with the exact same shots instead of guessed at.
 
     Returns:
         A dictionary mapping measurement outcomes to their counts.
@@ -110,7 +132,7 @@ def run_bell_experiment(shots: int = 1024) -> dict:
 
     # Use AerSimulator — a high-performance quantum circuit simulator
     # provided by the qiskit-aer package
-    simulator = AerSimulator()
+    simulator = AerSimulator(seed_simulator=seed)
 
     # Transpile the circuit for the simulator
     # Transpilation converts the circuit into instructions the simulator can run
@@ -168,7 +190,8 @@ def main():
     print(f"  Total shots:             {analysis['total_shots']}")
     print(f"  Correlated (00 + 11):    {analysis['correlated']}")
     print(f"  Anti-correlated (01 + 10): {analysis['anti_correlated']}")
-    print(f"  Correlation rate:        {analysis['correlation_rate']:.2f}%")
+    print(f"  Unrecognised outcomes:   {analysis['unrecognised']}")
+    print(f"  Correlation rate:        {analysis['correlation_rate'] * 100:.2f}%")
     print("-" * 35)
     print()
 
@@ -183,7 +206,10 @@ def main():
     print()
     print("  This correlation is the foundation for quantum digital")
     print("  signatures: two parties sharing entangled particles will")
-    print("  always get correlated measurement results.")
+    print("  always get correlated measurement results — provided BOTH")
+    print("  measure in the same basis. Measuring in different bases gives")
+    print("  uncorrelated results, and that basis choice is exactly what")
+    print("  the detection engine exploits to catch channel tampering.")
     print("=" * 55)
 
     return counts
