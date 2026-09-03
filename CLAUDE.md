@@ -70,8 +70,13 @@ The dependency list is the evidence for constraint 1, so keep it short and borin
   derivation has to survive a judge asking about it.
 - Attacks go through the public API of the module they attack. An adversary that
   reaches into internals proves nothing.
-- Non-trivial logic leaves one runnable check behind — a small `test_*.py` that
-  fails if the logic breaks. No fixtures, no elaborate suites.
+- Non-trivial logic leaves a runnable check behind — a `test_*.py` that fails if
+  the logic breaks, sized to the logic: one function usually needs one or two
+  cases, a small lookup table or validation function can earn a handful. What
+  "no fixtures, no elaborate suites" actually bans is framework weight —
+  mocking, `setUp`/`tearDown` chains, parametrize plugins, page-object-style
+  abstractions — not a proportionate number of plain assertions. A dozen
+  one-line `assert`s in flat functions is not an elaborate suite.
 - One branch per track (`m1-core`, `m2-protocol`, …). Merge to `master` when your
   module works against the stubs. CI runs on every branch, so you get a
   test result before you open a PR.
