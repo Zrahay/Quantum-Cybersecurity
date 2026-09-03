@@ -2,7 +2,12 @@
 
 Standard teleportation: Alice's Bell measurement leaves Bob's qubit in one
 of four Pauli-twisted states. The classical bits (clbit0, clbit1) select
-the undoing operator Z^{clbit0} X^{clbit1}.
+the undoing operator:
+
+    Z^{clbit0}  and  X^{clbit1}
+
+Bit order is circuit order (control / message bit first), matching
+contracts.Signature.bell_outcomes -- not Qiskit little-endian count strings.
 """
 
 from __future__ import annotations
