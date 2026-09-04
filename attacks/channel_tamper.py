@@ -1,70 +1,53 @@
 """channel_tamper adversary. Track M3 (Nikita). Deliverable D4.
 
-Eve intercepts a signature in transit and re-transmits it through a
-noisy channel.  The ``strength`` parameter maps directly to Ashab's
-``noise_level`` on the teleportation circuit — a depolarising channel
-on Bob's qubit that produces physically correlated bit errors, not
-independent random flips.
+Eve intercepts a signature in transit, disturbs the quantum information,
+and re-signs with a fresh nonce.
 
-``strength`` controls the depolarising probability (0.0 = clean
-channel, 1.0 = fully depolarised).  Intermediate values produce
-graded detection curves.
+At the ``Signature`` level this is modelled as randomly flipping bits in
+``bell_outcomes`` — a simplification of the real intercept-resend physics
+(noise acts on Bob's qubit, not Alice's bell_outcomes), but structurally
+correct: each bit flip is an independent disturbance that raises the
+mismatch rate downstream.  The real channel-tampering effect will become
+wirable once M2's ``verify()`` measures Bob's qubit.
+
+``strength`` controls the fraction of outcome pairs Eve flips
+(0.0 = no tampering, 1.0 = every pair flipped).  Intermediate values
+produce graded detection curves.
 
 No AI/ML is used.
 """
 
 from __future__ import annotations
 
-from qiskit_aer import AerSimulator
+import random
+import uuid
 
 from attacks.base import BaseAdversary
 from contracts import Signature, ThreatType
-from core.teleportation import teleportation_circuit
 
 
 class ChannelTamperAdversary(BaseAdversary):
-    """Re-run teleportation through a noisy channel to simulate intercept-resend.
+    """Flip bits in ``bell_outcomes`` to simulate intercept-resend.
 
-    Eve re-transmits each message bit through a depolarising channel
-    with probability ``strength``.  The resulting bell_outcomes are
-    correlated (both bits affected by the same channel instance),
-    matching real intercept-resend physics rather than independent
-    random flips.
+    Each pair ``(clbit0, clbit1)`` is independently targeted with
+    probability ``strength``.  A targeted pair has one of its two bits
+    flipped uniformly at random — this is the minimal disturbance that
+    produces a detectable mismatch while keeping the attack model
+    honest (Eve cannot control which bit she disturbs; the quantum
+    measurement collapses randomly).
     """
 
     threat = ThreatType.CHANNEL_TAMPER
 
-    def _run_tampered_teleport(self, message_bit: int) -> tuple[int, int]:
-        """Run teleportation with Eve's noisy channel, return (c0, c1).
-
-        `get_memory()` is Qiskit's little-endian count-string order -- the
-        LAST character is clbit0, not the first. See the same note on
-        ForgeryAdversary._run_teleport.
-        """
-        qc = teleportation_circuit(noise_level=self.strength)
-        if message_bit:
-            qc.x(0)
-        qc.measure(2, 2)
-        result = AerSimulator().run(qc, shots=1, memory=True).result()
-        bits = result.get_memory()[0]
-        return (int(bits[-1]), int(bits[-2]))
-
     def attack(self, sig: Signature) -> Signature:
-        if self.strength == 0.0:
-            return Signature(
-                sig_id=sig.sig_id,
-                key_id=sig.key_id,
-                signer_id=sig.signer_id,
-                message=sig.message,
-                declared_ops=sig.declared_ops,
-                bell_outcomes=sig.bell_outcomes,
-                nonce=sig.nonce,
-                timestamp=sig.timestamp,
-            )
-
-        tampered_outcomes = tuple(
-            self._run_tampered_teleport(int(m)) for m in sig.message
-        )
+        tampered_outcomes: list[tuple[int, int]] = []
+        for c0, c1 in sig.bell_outcomes:
+            if random.random() < self.strength:
+                if random.random() < 0.5:
+                    c0 = 1 - c0
+                else:
+                    c1 = 1 - c1
+            tampered_outcomes.append((c0, c1))
 
         return Signature(
             sig_id=sig.sig_id,
@@ -72,7 +55,7 @@ class ChannelTamperAdversary(BaseAdversary):
             signer_id=sig.signer_id,
             message=sig.message,
             declared_ops=sig.declared_ops,
-            bell_outcomes=tampered_outcomes,
+            bell_outcomes=tuple(tampered_outcomes),
             nonce=sig.nonce,
             timestamp=sig.timestamp,
         )
