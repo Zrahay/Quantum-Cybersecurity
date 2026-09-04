@@ -187,6 +187,28 @@ class TestEvaluateInsufficientData(unittest.TestCase):
             self.fail("evaluate() must not raise on an empty record list")
 
 
+class TestEvaluateInputValidation(unittest.TestCase):
+    def test_negative_noise_floor_rejected(self):
+        _, sig, records = _legit_signature()
+        with self.assertRaises(ValueError):
+            evaluate(records, sig, set(), noise_floor=-0.1)
+
+    def test_noise_floor_above_one_rejected(self):
+        _, sig, records = _legit_signature()
+        with self.assertRaises(ValueError):
+            evaluate(records, sig, set(), noise_floor=1.1)
+
+    def test_zero_target_forgery_prob_rejected(self):
+        _, sig, records = _legit_signature()
+        with self.assertRaises(ValueError):
+            evaluate(records, sig, set(), target_forgery_prob=0.0)
+
+    def test_negative_target_forgery_prob_rejected(self):
+        _, sig, records = _legit_signature()
+        with self.assertRaises(ValueError):
+            evaluate(records, sig, set(), target_forgery_prob=-1e-6)
+
+
 class TestEvaluateLegitimate(unittest.TestCase):
     def test_clean_signature_is_accepted(self):
         key, sig, records = _legit_signature()

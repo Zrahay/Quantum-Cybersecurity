@@ -75,6 +75,28 @@ def _margin_for(p: float, n: int) -> float:
     return math.sqrt(-math.log(p) / (2.0 * n))
 
 
+def _validate_independent_inputs(noise_floor: float, target_forgery_prob: float) -> None:
+    """Guard the two caller-supplied thresholds' own preconditions.
+
+    `noise_floor` is a mismatch rate -- must be a probability. Negative or
+    >1 doesn't crash downstream (it just produces a nonsensical threshold
+    or a discarded chi-square cell), which is worse than failing loudly:
+    a caller-side bug would otherwise show up as a wrong VERDICT rather
+    than an error pointing at its actual cause.
+
+    `target_forgery_prob` feeds `math.log` in `_margin_for` -- <= 0 raises
+    a bare `math domain error` with no indication of which argument was
+    wrong; > 1 is not a probability at all. Both are checked here instead,
+    matching the style of `QDSConfig.__post_init__`'s own validation.
+    """
+    if not 0.0 <= noise_floor <= 1.0:
+        raise ValueError(f"noise_floor must be a probability in 0.0-1.0, got {noise_floor}")
+    if not 0.0 < target_forgery_prob <= 1.0:
+        raise ValueError(
+            f"target_forgery_prob (p_f) must be in (0.0, 1.0], got {target_forgery_prob}"
+        )
+
+
 def _derive_thresholds(noise_floor: float, n: int, target_forgery_prob: float) -> tuple[float, float]:
     """Derive (s_a, s_v) from an INDEPENDENT noise floor -- see module docstring.
 
@@ -180,6 +202,7 @@ def evaluate(
     Check replay FIRST inside this function -- a replayed signature has
     perfect statistics, so any other ordering lets it through.
     """
+    _validate_independent_inputs(noise_floor, target_forgery_prob)
     now = time.time()
 
     # 1. REPLAY -- checked first and unconditionally, regardless of how
@@ -238,9 +261,14 @@ def evaluate(
 
     # 4. Hoeffding bound on forging this well by chance at this L. By
     # construction `margin_for(target_forgery_prob, n)` is exactly the
-    # margin s_a was built from, so this reports the achieved bound at
-    # this sample size -- the "Hoeffding bound at this L" DetectionResult
-    # documents, not a per-signature-massaged number.
+    # margin s_a was built from, so this ALWAYS evaluates to exactly
+    # target_forgery_prob, for any n or observed rate -- it is the
+    # protocol's DESIGNED security guarantee at this sample size (the
+    # p_f the thresholds were sized against), not a statistic computed
+    # from this particular signature. It will read the same on every
+    # DetectionResult; that is intentional, not a bug -- see the module
+    # docstring on why noise_floor/target_forgery_prob are independent
+    # inputs rather than derived per-signature.
     forgery_bound = hoeffding_bound(n, _margin_for(target_forgery_prob, n))
 
     # 5. Chi-square goodness-of-fit: are the observed match/mismatch
