@@ -30,6 +30,15 @@ def run_batch(
     ``attack_type`` and comparing ``ops_match`` / ``outcomes_match``
     rates.  M6 can use it for benchmarking by timing the loop externally.
 
+    NOTE for whoever wires this to real (Aer-backed) detection:
+    ``outcomes_match_rate`` is a classical diff against the ORIGINAL
+    signature, not blind evidence a real verifier has access to, and it is
+    NOT how ``ChannelTamperAdversary``'s attack becomes detectable through
+    M2's ``verify()`` — that adversary's real signal is
+    ``adversary.noise_level_override()``, which this function does not
+    consume (it has no ``KeyPair`` to call ``verify()`` with). See
+    attacks/channel_tamper.py and attacks/base.py.
+
     Args:
         adversary:   An ``Adversary`` implementation (Forgery, Replay, etc.).
         signatures:  List of original (untampered) ``Signature`` objects.

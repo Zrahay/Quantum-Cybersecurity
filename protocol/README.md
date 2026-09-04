@@ -2,10 +2,12 @@
 
 Track M2 (Shubhang). Deliverable D1.
 
-**Status: scaffold.** The architecture, types, seams and tests are real. The
-teleportation-based QDS construction has **not been selected**, so there is no
-signing equation, no key-generation algorithm and no verification predicate in
-here yet. Nothing in this module performs a cryptographic operation.
+**Status: implemented.** The protocol is P1, from Wallden, Dunjko, Kent &
+Andersson, "Quantum digital signatures with quantum-key-distribution
+components", Phys. Rev. A 91, 042304 (2015) — arXiv:1403.5551 — with the
+distribution stage carried by teleportation over Bell pairs rather than by
+direct transmission. `keygen`, `sign` and `verify` are real; the
+`ALGORITHM GOES HERE` blocks are gone.
 
 ## Responsibilities
 
@@ -49,9 +51,9 @@ M1  core/            bell pairs · teleportation · Pauli correction · measurem
       |
       |  QuantumCore interface  (protocol/quantum_interface.py)
       |    M1QuantumCore    -- thin adapter over core/, the real backend
-      |    MockQuantumCore  -- seeded placeholder, tests only
+      |    MockQuantumCore  -- analytic ideal-channel model, tests only
       v
-M2  protocol/        keygen · sign · verify        <- YOU ARE HERE
+M2  protocol/        keygen · sign · verify        <- P1, implemented
       |
       |  list[MeasurementRecord]   the only type crossing this seam
       v
@@ -68,10 +70,21 @@ M5  app/             dashboard — renders, recomputes nothing
 frozen types and drift from the other five tracks. The only new model here is
 `QDSConfig`, which nothing outside M2 reads.
 
+## The protocol, in one paragraph
+
+For each of `L` signature elements, Alice holds a Pauli eigenstate — a
+`(pauli_map[i], private_bits[i])` pair naming one of the four BB84 states.
+Signing declares that classical description and teleports the states to the
+recipient. Verification is **state elimination**: the recipient measures each
+element in a basis chosen independently of Alice, and keeps only the elements
+where their basis matches the declared Pauli. On those, a disagreement is a
+genuine contradiction. About `L/2` elements survive (P1's `K`), and the
+mismatch rate over them is the statistic M4 thresholds against `s_a` and `s_v`.
+
 ## The M1 → M2 interface
 
 `protocol/quantum_interface.py` defines `QuantumCore`, a `typing.Protocol`
-(structural, matching `contracts.Adversary`) with four methods:
+(structural, matching `contracts.Adversary`) with five methods:
 
 | Method | M2 expects back |
 |---|---|
@@ -79,6 +92,16 @@ frozen types and drift from the other five tracks. The only new model here is
 | `teleport(resource, *, noise_level)` | `(clbit0, clbit1)` per qubit, control bit **first**, circuit order |
 | `correction_for(bell_outcome)` | a `PauliOp`; pure lookup, no channel |
 | `measure(resource, basis, *, noise_level)` | classical bits `0`/`1`, **per-copy order preserved** |
+| `teleport_and_measure(resource, preparations, bases, *, noise_level)` | `((clbit0, clbit1), bob_bit)` per copy, **both halves from the same shot** |
+
+`teleport_and_measure` is the method the signature protocol actually runs.
+`teleport` and `measure` remain because they are cheaper when only one half of
+the process is needed, and because M3 already uses the teleport path. The
+single-shot requirement on `teleport_and_measure` is the whole reason it
+exists separately: calling `teleport` then `measure` runs two independent
+shots, so the Bell outcome and the measured bit describe *different copies*,
+and legitimate signatures show a ~50% mismatch rate — a failure that looks
+like broken physics rather than a broken call sequence.
 
 Three details are load-bearing and each has a comment in `contracts.py` behind it:
 
@@ -96,105 +119,125 @@ Three details are load-bearing and each has a comment in `contracts.py` behind i
 `noise_level` is a keyword parameter, not a `Channel` object: the channel is a
 dial, per the note at the bottom of `contracts.py`.
 
-### Why the interface exists
+### Why the interface still has two implementations
 
 The working agreement says not to add an interface with one implementation. This
-one has two, and it earns them: every primitive in `core/` currently returns
-`[]`, `PauliOp.I` or an empty circuit, so without a mock M2 cannot be exercised
-at all and the two tracks serialise. `M1QuantumCore` conforms today but raises
-`QuantumCoreError` from `bell_pairs`, `teleport` and `measure`, because M1
-exposes circuit *builders* while M2 needs *results* — an unagreed gap, and
-guessing at it would be worse than the error message.
+one has two, and it earns them:
 
-**When M1 lands, delete `MockQuantumCore` and collapse this file into direct
-`core.*` imports.** That is the correct end state; do not keep the abstraction
-out of sentiment. `tests/test_quantum_core.py::TestM1AdapterRefusesRatherThanGuesses`
-starts failing as each M1 entry point appears — that failure is the signal to
-implement the adapter method, not a regression.
+- **`M1QuantumCore`** is the real backend, a thin adapter over `core/runtime.py`
+  and `core/pauli.py`. It imports `core.*` lazily so `import protocol` works
+  without Qiskit/Aer; *calling* its methods requires them.
+- **`MockQuantumCore`** is an analytically exact ideal-channel model: same-basis
+  measurement returns the prepared bit with certainty, cross-basis is uniform.
+  It is NOT a quantum simulator — it builds no circuits — but for the states P1
+  uses, its `teleport_and_measure` is faithful to the ideal physics, which makes
+  it possible to test protocol *logic* (key material, basis agreement, mismatch
+  counting) deterministically and without Aer. `tests/test_runtime.py` pins the
+  real Aer path to the same two properties, so a mock pass plus a runtime pass
+  is evidence the protocol is correct and the backend is faithful.
 
-### MockQuantumCore
+**What is NOT faithful about the mock, and must never be quoted on:**
 
-Development and tests only. It is **not a quantum simulation** — seeded
-pseudo-random bits of the right shape, with no superposition, entanglement or
-decoherence. No output of it is evidence of anything: not a mismatch rate, not a
-noise floor, not a forgery probability. Nothing from it goes in the deck, on the
-dashboard, or into a benchmark, and nothing in the detection path imports it.
+- **Noise.** `noise_level` is an independent per-bit flip. The real channel is a
+  depolarising error on the recipient's half of the Bell pair, applied before
+  the Bell measurement, and its induced mismatch rate is NOT equal to
+  `noise_level` — measure it, do not assume it. Every noise-floor number in the
+  deck must come from `M1QuantumCore`.
+- **Bell outcomes.** Uniform random draws, not the actual measurement of an
+  entangled pair. Nothing about `bell_outcomes` from the mock is evidence.
+- Anything at all about security. It cannot forge and cannot be forged.
 
-## Where the algorithm plugs in
+## Mapping onto the frozen contracts
 
-There are exactly three places, each marked `ALGORITHM GOES HERE`:
-
-| File | Function | Must decide |
+| Contract field | P1 meaning | Notes |
 |---|---|---|
-| `signer.py` | `keygen` | what `private_bits` is; how `pauli_map` is derived; whether the `L` copies are prepared here or at signing time |
-| `signer.py` | `sign` | how `declared_ops` is computed — the correction the signer *claims*, which is what a forger must guess; how `bell_outcomes` is obtained |
-| `verifier.py` | `verify` | which basis each copy is measured in; how `expected` is predicted; how `observed` is collected in per-copy order |
+| `KeyPair.private_bits[i]` | eigenvalue bit of element `i`: 0 for +1, 1 for -1 | matches `MeasurementRecord.expected` convention |
+| `KeyPair.pauli_map[i]` | which Pauli element `i` is an eigenstate of: `Z` or `X` | the contract comment says "message bit -> required correction", which is a different reading of the same field; the TYPE is unchanged and no other track reads it, so nothing breaks, but the comment is now wrong — correcting it is a Decision Log item |
+| `KeyPair.n_copies` | `L`, the number of signature elements | the security parameter |
+| `Signature.declared_ops` | the Pauli of each element, which together with `private_bits` is the classical description P1 calls `PrivKey` | length `L`, not `len(message)` |
+| `Signature.bell_outcomes` | Alice's Bell-measurement results from teleporting the `L` elements | length `L`; the recipient needs these to apply the right Pauli correction |
+| `MeasurementRecord.copy_index` | the element's original position in `0..L-1` | not a renumbering of the survivors — the exponential-in-`L` bound only means anything if the index is real |
+| `MeasurementRecord.expected` | Alice's eigenvalue bit for that element | 0 means +1 eigenstate, per the contract |
+| `MeasurementRecord.observed` | the bit the recipient measured | 0/1, never +1/-1 |
 
-No caller signature changes when they are filled in: `core` and `config` are
-already threaded through, and `QDSConfig` is already the place for new
-parameters. A separate `QDSAlgorithm` interface was considered and rejected for
-now — it would have zero implementations, which is the interface-with-no-users
-failure mode. Add it when a construction is chosen *and* a second one is needed
-for comparison.
+## RNG stream independence
 
-### The placeholder, and why it returns values
+`protocol/config.py:derive_rng(seed, label)` derives independent `random.Random`
+streams from `(seed, label)`. The signer draws key material from
+`KEY_MATERIAL_STREAM = "keygen/elements"`; the verifier draws measurement bases
+from `MEASUREMENT_BASIS_STREAM = "verify/bases"`. The labels MUST differ.
 
-`keygen` and `sign` return correctly shaped `KeyPair` / `Signature` objects by
-default because M3, M4 and M5 already integrate against them, and serialising
-four tracks behind one undecided algorithm costs more than the placeholder does.
-Two guardrails make that defensible:
-
-- The placeholder performs **no** cryptographic operation — no XOR, no hash, no
-  invented signing equation. There is nothing there to mistake for a
-  construction.
-- `QDSConfig(strict=True)` makes all three entry points raise
-  `ProtocolNotSelectedError`, and the tests assert it. The "not implemented"
-  claim rests on a passing test rather than on a docstring.
-
-`verify()` returns `[]`, which **fails closed**:
-`detection.statistics.mismatch_rate` raises `ValueError` on an empty list
-precisely so "no data" cannot read as a zero mismatch rate — the strongest
-possible evidence of a legitimate signature. Do not "fix" that `ValueError` by
-fabricating records.
+This exists because of a real bug: `keygen` and `verify` both originally seeded
+`random.Random(config.seed)` directly, so the verifier reproduced Alice's basis
+choices exactly. Every element came out conclusive, and a forged signature
+scored a perfect 0.000 mismatch rate — undetectable. Independence of Alice's
+preparation basis from the recipient's measurement basis is a SECURITY property
+of P1, not a convenience. `tests/test_signature.py::TestRngStreamIndependence`
+is the regression guard.
 
 ## Tests
 
 ```
-python3 -m unittest tests.test_signature tests.test_quantum_core -v
+python3 -m unittest tests.test_signature tests.test_quantum_core tests.test_runtime -v
 ```
 
-Or, with the pinned dev environment installed (`pip install -e .`), `pytest`
-collects them along with everything else.
+Three layers, all load-bearing:
 
-These test the scaffold only: API shape, argument validation, dependency
-injection, mock determinism, and the honesty of the unimplemented signal. **No
-test here claims cryptographic correctness**, because there is no construction
-to be correct against. When one is selected, the D1 tests — unforgeability,
-transferability, deterministic acceptance at the noise floor — get added
-alongside these rather than replacing them.
+1. **`test_signature.py`** — API shape and validation, plus P1 behaviour:
+   legitimate mismatch is exactly 0 on the ideal channel, forgery mismatch is
+   ~1/4 and separates from legitimate, impersonation separates, fail-closed on
+   `PauliOp.I`, RNG stream independence.
+2. **`test_quantum_core.py`** — the `QuantumCore` interface, validator, mock
+   determinism, and the analytically exact `teleport_and_measure` properties on
+   both the mock and the real Aer adapter.
+3. **`test_runtime.py`** — `core/runtime.py`: bit-order conversion, the
+   prepare/measure round-trip, and the same two physics properties pinned to
+   the real Aer path.
 
-## Open TODOs blocked on protocol selection
+## Stated limitations (belong in D1, openly)
 
-1. `keygen` — real quantum public key distribution.
-2. `sign` — the signing operation and `declared_ops`.
-3. `verify` — basis choice, outcome prediction, record construction.
-4. `QDSConfig.bases` — empty by design until the protocol says which Pauli bases
-   a verifier uses, and in what proportion.
-5. **Justify the independence of the `L` outcomes.** M4's Hoeffding bound assumes
-   it; whether it holds follows from how the copies are prepared, which makes it
-   M2's argument to make in D1, explicitly.
-6. Show `verify()` is cheap. Low computational complexity is a stated requirement
-   of the problem statement — keep it `O(L)` in measurements with no per-copy
-   re-derivation of the key, and put the count in D1.
-7. Agree the `QuantumCore` method set with M1, and replace `MockQuantumCore` in
-   any non-test caller.
+1. **Message binding.** `keygen(..., message_length=m)` generates
+   `2*m` independent `L`-element sequences — one per `(message bit position,
+   bit value)` pair — and `sign()` reveals classical data for exactly the `m`
+   sequences matching the actual message, `sequence(i, message[i])`. A
+   signature re-presented against a different message routes `verify()`'s
+   lookup onto the sibling, never-revealed sequence, which is independently
+   random from the true one — the same ~1/4-mismatch forgery-detection math
+   catches a message swap as catches a blind key guess. See
+   `tests/test_signature.py::TestMessageBinding`. This is additive to the
+   frozen `contracts.KeyPair` (only the length relationship between
+   `pauli_map`/`private_bits` and `n_copies` changed, from `L` to `2mL`; no
+   field was added or renamed), so no Decision Log item for the schema
+   itself — flagging the mechanism in D1 as new is still worth doing.
 
-Two things D1 must state openly rather than bury:
+2. **Replay detection is not quantum.** No-cloning means the quantum state
+   cannot be copied and resent, so a replay is necessarily a reused *classical*
+   transcript, and the defence is nonce plus timestamp freshness at the
+   protocol layer. No-cloning *forces* this — say so.
 
-- **Replay detection is not quantum.** No-cloning means the state cannot be
-  copied and resent, so a replay is necessarily a reused *classical* transcript,
-  and the defence is nonce plus timestamp freshness at the protocol layer.
-  No-cloning *forces* this — say so.
-- **Hoeffding assumes independent outcomes** and chi-square needs an expected
-  count of at least 5 per cell. Both assumptions belong in D1, stated, not
-  buried.
+3. **Hoeffding assumes independent measurement outcomes**, and chi-square needs
+   an expected count of at least 5 per cell. The independence is justified here:
+   every element's basis and bit — across all `2m` sequences — are drawn
+   independently in `keygen`, so the recipient's measurement outcomes are
+   independent too. Correlating them would invalidate the bound while leaving
+   every test passing. Both assumptions belong in D1, stated explicitly, not
+   buried.
+
+4. **`verify()` is `O(mL)`** in measurements — `m` message bits times `L`
+   copies per bit — with no per-copy re-derivation of the key. Low
+   computational complexity is a stated requirement of the problem statement;
+   put the count in D1.
+
+## Open items
+
+1. **M3 coordination.** `sign()` returns `message_length * L`-length
+   `declared_ops` and `bell_outcomes` (previously flagged here as `L`-length;
+   now scaled by message length too), but M3's adversaries currently size
+   their mutations off `len(sig.message)`. A real signature's `message` is
+   short (e.g. `(1, 0, 1)`, `message_length=3`) while its `declared_ops` is
+   length `3*L`, so M3's forgery only touches the first few elements. That is
+   an M3 follow-up, not an M2 bug, but it needs agreeing before the demo.
+2. **`contracts.KeyPair.pauli_map` comment.** Says "message bit -> required
+   correction"; P1 uses it as "which Pauli this element is an eigenstate of".
+   The type is unchanged; correcting the comment is a Decision Log item.
+3. ~~Per-message-bit key material.~~ Done — see "Message binding" above.
