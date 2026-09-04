@@ -527,24 +527,73 @@ def main() -> None:
 
     if sign_clicked:
         with st.spinner("Signing message..."):
-            sig = sign(message_bits, key, core=st.session_state.quantum_core, config=st.session_state.config)
-            st.session_state.last_signature = sig
-            result = _run_full_pipeline(sig)
-            st.session_state.last_detection = result
-            _log_event(sig, result, attack_label=None)
-            st.session_state.last_action = "sign"
-            st.session_state.action_timestamp = time.time()
-            action_taken = True
+            try:
+                sig = sign(message_bits, key, core=st.session_state.quantum_core, config=st.session_state.config)
+                st.session_state.last_signature = sig
+                result = _run_full_pipeline(sig)
+                st.session_state.last_detection = result
+                _log_event(sig, result, attack_label=None)
+                st.session_state.last_action = "sign"
+                st.session_state.action_timestamp = time.time()
+                action_taken = True
+            except Exception as e:
+                st.error(f"❌ Signing failed: {e}")
+                _log_event(
+                    Signature(
+                        sig_id="error",
+                        key_id=key.key_id,
+                        signer_id=key.signer_id,
+                        message=message_bits,
+                        declared_ops=(),
+                        bell_outcomes=(),
+                        nonce="error",
+                        timestamp=time.time(),
+                    ),
+                    DetectionResult(
+                        sig_id="error",
+                        verdict=Verdict.REJECT,
+                        threat=ThreatType.NONE,
+                        mismatch_rate=1.0,
+                        n_measurements=0,
+                        forgery_prob_bound=1.0,
+                        chi2_stat=0.0,
+                        chi2_p_value=1.0,
+                        reason=f"Signing error: {e}",
+                        timestamp=time.time(),
+                    ),
+                    attack_label="Sign (Error)",
+                )
+                action_taken = True
 
     if attack_clicked and attack_adv and st.session_state.last_signature is not None:
         with st.spinner(f"Launching {attack_clicked} attack..."):
-            tampered_sig = attack_adv.attack(st.session_state.last_signature)
-            result = _run_full_pipeline(tampered_sig)
-            st.session_state.last_detection = result
-            _log_event(tampered_sig, result, attack_label=attack_clicked)
-            st.session_state.last_action = attack_clicked.lower().replace(" ", "_")
-            st.session_state.action_timestamp = time.time()
-            action_taken = True
+            try:
+                tampered_sig = attack_adv.attack(st.session_state.last_signature)
+                result = _run_full_pipeline(tampered_sig)
+                st.session_state.last_detection = result
+                _log_event(tampered_sig, result, attack_label=attack_clicked)
+                st.session_state.last_action = attack_clicked.lower().replace(" ", "_")
+                st.session_state.action_timestamp = time.time()
+                action_taken = True
+            except Exception as e:
+                st.error(f"❌ {attack_clicked} attack failed: {e}")
+                _log_event(
+                    st.session_state.last_signature,
+                    DetectionResult(
+                        sig_id=st.session_state.last_signature.sig_id,
+                        verdict=Verdict.REJECT,
+                        threat=ThreatType.NONE,
+                        mismatch_rate=1.0,
+                        n_measurements=0,
+                        forgery_prob_bound=1.0,
+                        chi2_stat=0.0,
+                        chi2_p_value=1.0,
+                        reason=f"Attack error: {e}",
+                        timestamp=time.time(),
+                    ),
+                    attack_label=f"{attack_clicked} (Error)",
+                )
+                action_taken = True
 
     if action_taken:
         st.rerun()
