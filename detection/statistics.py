@@ -2,13 +2,14 @@
 
 No machine learning. Every function here is a closed-form bound or a
 hypothesis test you could write on a whiteboard.
-
-STUB -- importable and correctly typed. Real implementation is M4's.
 """
 
 from __future__ import annotations
 
+import math
+
 from contracts import MeasurementRecord
+from scipy import stats
 
 
 def mismatch_rate(records: list[MeasurementRecord]) -> float:
@@ -16,7 +17,7 @@ def mismatch_rate(records: list[MeasurementRecord]) -> float:
 
     Raises ValueError on an empty list. This is deliberate: a rate of 0.0
     is the single strongest evidence of a legitimate signature, so
-    returning it for "we have no data" fails open — every forgery would
+    returning it for "we have no data" fails open -- every forgery would
     sail through `r < s_a`. No measurements is insufficient data, and the
     caller must say so, exactly as chi2_uniformity below refuses to return
     a p-value it cannot justify.
@@ -32,8 +33,11 @@ def hoeffding_bound(n: int, margin: float) -> float:
     Assumes the n outcomes are INDEPENDENT. M2 must justify that from how
     the copies are prepared -- if they are correlated this does not hold.
     """
-    # TODO(M4): real bound.
-    return 1.0
+    if n <= 0:
+        return 1.0
+    if margin <= 0:
+        return 1.0
+    return math.exp(-2.0 * n * margin * margin)
 
 
 def chi2_uniformity(counts: dict[str, int], expected: dict[str, float]) -> tuple[float, float]:
@@ -43,5 +47,14 @@ def chi2_uniformity(counts: dict[str, int], expected: dict[str, float]) -> tuple
     per cell -- below that the test is invalid and the caller should report
     insufficient data rather than a meaningless p-value.
     """
-    # TODO(M4): real chi-square.
-    return (0.0, 1.0)
+    # Align keys
+    all_keys = sorted(set(counts.keys()) | set(expected.keys()))
+    observed = [counts.get(k, 0) for k in all_keys]
+    expected_counts = [expected.get(k, 0.0) for k in all_keys]
+
+    # Check expected count >= 5 per cell
+    if any(e < 5.0 for e in expected_counts):
+        return (0.0, 1.0)  # Insufficient data for chi-square
+
+    stat, p_val = stats.chisquare(observed, expected_counts)
+    return (float(stat), float(p_val))
