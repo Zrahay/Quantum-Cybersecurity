@@ -112,14 +112,18 @@ class TestReplay(unittest.TestCase):
 class TestForgery(unittest.TestCase):
 
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI. 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
         self.assertNotEqual(r1.declared_ops, r2.declared_ops)
 
     def test_different_outcomes_each_time(self):
-        sig = _make_sig()
+        # Same collision-probability reasoning as test_different_ops_each_time.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
@@ -347,7 +351,10 @@ class TestImpersonation(unittest.TestCase):
         self.assertEqual(len(result.bell_outcomes), n_elements)
 
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI (observed). 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ImpersonationAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
