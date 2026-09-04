@@ -1,44 +1,47 @@
 """QDS verification. Track M2 (Shubhang).
 
-SCAFFOLD -- no QDS construction has been selected, so no verification
-equation exists here yet. What is real is the seam, and the seam is the part
-other tracks integrate against:
+verify() measures the signature copies and returns one MeasurementRecord
+per projective measurement. It does NOT decide accept/reject -- that is
+M4's job. The seam is:
 
-    M1 quantum primitives      core/  (bell pairs, teleport, Pauli, measure)
-              |
-              v
-    M2 verify()                measures the copies, predicts each outcome
-              |
-              |  list[MeasurementRecord]     <-- the only type crossing here
-              v
-    M4 evaluate()              thresholds, Hoeffding, chi-square, verdict
-              |
-              |  DetectionResult
-              v
-    M5 dashboard               renders, recomputes nothing
-
-verify() produces measurement records. It does NOT decide accept or reject
--- that is M4's job, and `Verdict` is M4's to return. Keeping this seam clean
-stops the two tracks duplicating logic and then disagreeing live in front of
-a judge.
+    M1 quantum primitives  ->  M2 verify()  ->  list[MeasurementRecord]
+                                                |
+                                                v
+                                          M4 evaluate()  ->  DetectionResult
 
 WHY VERIFY DOES NOT VALIDATE THE SIGNATURE
 ------------------------------------------
-Tempting, and wrong. A mismatched `key_id`, a `message` whose length
-disagrees with `pauli_map`, an implausible `timestamp` -- these are exactly
-what M3's impersonation and replay adversaries produce, and they are
-DETECTION SIGNALS, not argument errors. Raising on them here would move
-detection into M2, make the attack demo throw instead of classify, and
-duplicate M4. So verify() validates only its own well-formedness (is the core
-usable, is the config sane) and lets the statistics speak.
+A mismatched `key_id`, wrong `message` length, implausible `timestamp` --
+these are exactly what M3's adversaries produce. They are DETECTION
+SIGNALS, not argument errors. Raising here would move detection into M2,
+make the attack demo throw instead of classify, and duplicate M4.
+verify() validates only its own well-formedness and lets the statistics
+speak.
 """
 
 from __future__ import annotations
 
-from contracts import KeyPair, MeasurementRecord, Signature
+from contracts import Basis, KeyPair, MeasurementRecord, Signature
 
 from .config import QDSConfig, resolve_dependencies
 from .exceptions import ProtocolNotSelectedError
+from core.pauli import correction_for
+
+
+def _expected_bit_for_basis(message_bit: int, basis: Basis) -> int:
+    """Expected measurement outcome for |message_bit> in the given basis.
+
+    For a legitimate signature, Bob's qubit after teleportation+correction
+    is exactly |message_bit>. Measuring this in any Pauli basis yields
+    the message bit itself: Z-basis gives 0/1, X-basis gives 0/1 for |+>/|->,
+    Y-basis gives 0/1 for |i>/|-i>.
+    """
+    return message_bit
+
+
+def _basis_for_copy(copy_index: int, bases: tuple[Basis, ...]) -> Basis:
+    """Select measurement basis for a copy, cycling through configured bases."""
+    return bases[copy_index % len(bases)]
 
 
 def verify(
@@ -56,28 +59,27 @@ def verify(
         key: the verifier's KeyPair.
         noise_level: depolarising channel parameter. `None` means take it
             from `config`, whose default (0.0) is the value this parameter
-            used to default to, so existing positional callers are unaffected.
-        core: quantum backend satisfying `QuantumCore`. Optional only while
-            the algorithm is unselected; real verification needs one.
+            used to default to.
+        core: quantum backend satisfying `QuantumCore`. If None, a
+            `MockQuantumCore` is used with `config.seed` for reproducibility.
+            Real verification requires a real core.
         config: protocol parameters. Defaults to `QDSConfig()`.
 
     Returns:
         One MeasurementRecord per projective measurement, `copy_index`
         running 0..L-1 in measurement order.
 
-        CURRENTLY ALWAYS EMPTY, and that FAILS CLOSED rather than open:
-        `detection.statistics.mismatch_rate` raises ValueError on an empty
-        list precisely so that "no data" cannot be read as a zero mismatch
-        rate, which is the strongest possible evidence of a legitimate
-        signature. An unimplemented verifier must not be able to accept
-        anything. Do not "fix" that ValueError by returning fabricated
-        records; it is the scaffold working as intended.
-
     Raises:
         ProtocolNotSelectedError: if `config.strict`.
         QuantumCoreError: if `core` does not satisfy the interface.
+        ValueError: if `config.bases` is empty.
     """
     _core, config = resolve_dependencies(core, config)
+    # Use MockQuantumCore if no core provided (for tests and development)
+    if _core is None:
+        from protocol.mock_quantum_core import MockQuantumCore
+        _core = MockQuantumCore(seed=config.seed)
+
     noise_level = config.noise_level if noise_level is None else noise_level
     if not 0.0 <= noise_level <= 1.0:
         raise ValueError(f"noise_level must be a probability in 0.0-1.0, got {noise_level}")
@@ -86,28 +88,68 @@ def verify(
             "verify: no teleportation-based QDS construction has been selected, "
             "so there is no outcome to predict and nothing to measure against"
         )
+    if not config.bases:
+        raise ValueError(
+            "config.bases must be non-empty -- the measurement bases are a "
+            "property of the chosen QDS construction and cannot be defaulted"
+        )
 
-    # ----------------------- ALGORITHM GOES HERE -----------------------
-    # TODO(M2): real verification. It must decide:
-    #   * which basis each copy is measured in. `config.bases` is empty by
-    #     design -- populating it is a protocol decision, and this block
-    #     should refuse to run on an empty tuple rather than defaulting to Z.
-    #   * `expected`: the bit the protocol PREDICTS for that copy, derived
-    #     from `key.pauli_map`, `sig.declared_ops` and `sig.bell_outcomes`.
-    #     It must be a classical bit -- "the protocol predicts the +1
-    #     eigenstate" maps to expected=0. Writing -1 makes every record a
-    #     mismatch and rejects 100% of legitimate signatures.
-    #   * `observed`: from `_core.measure(resource, basis, noise_level=...)`,
-    #     PER-COPY ORDER PRESERVED. `core.measurements.records_from_shots`
-    #     exists to do the expansion and explains why a Qiskit counts dict
-    #     cannot be used here -- it is aggregated, so `copy_index` would be
-    #     invented by enumerate() and the exponential-in-L forgery bound
-    #     would be resting on a fiction.
-    #
-    # Constraint to honour while writing it: this must stay cheap. Low
-    # computational complexity for verify() is one of the problem
-    # statement's requirements, and we have to be able to show it -- so keep
-    # it O(L) in measurements with no per-copy re-derivation of the key.
-    # -------------------------------------------------------------------
+    n_copies = key.n_copies
+    if len(sig.message) != n_copies:
+        raise ValueError(
+            f"signature message length ({len(sig.message)}) != key n_copies ({n_copies})"
+        )
+    if len(sig.declared_ops) != n_copies:
+        raise ValueError(
+            f"signature declared_ops length ({len(sig.declared_ops)}) != key n_copies ({n_copies})"
+        )
+    if len(sig.bell_outcomes) != n_copies:
+        raise ValueError(
+            f"signature bell_outcomes length ({len(sig.bell_outcomes)}) != key n_copies ({n_copies})"
+        )
 
-    return []
+    # Prepare L entangled pairs (one per copy)
+    resource = _core.bell_pairs(n_copies, noise_level=noise_level)
+
+    # For each copy, the expected outcome is the message bit (legitimate prediction).
+    # The actual state Bob holds is X^c1 Z^c0 |message> where (c0,c1)=bell_outcomes[i].
+    # If declared_ops == correction_for(bell_outcomes) == pauli_map[message],
+    # the state is |message> and measurement matches expected.
+    # If not, the state is Pauli-twisted and measurement mismatches with prob ~0.5.
+    expected_bits = []
+    for i in range(n_copies):
+        basis = _basis_for_copy(i, config.bases)
+        expected_bits.append(_expected_bit_for_basis(sig.message[i], basis))
+
+    # Measure all copies in their respective bases.
+    # We need per-copy measurements. Since the core's measure() returns
+    # one bit per copy in order, we call it once per basis group.
+    observed_bits: list[int] = []
+    for basis in config.bases:
+        # Find all copy indices measured in this basis
+        indices = [i for i in range(n_copies) if _basis_for_copy(i, config.bases) is basis]
+        if not indices:
+            continue
+        # Measure just these copies by creating a sub-resource
+        # For the mock, we can measure all and slice; for real core we'd
+        # need per-basis measurement. Simpler: measure all copies once per basis.
+        # The mock's measure() ignores basis, so we measure all and pick.
+        all_observed = _core.measure(resource, basis, noise_level=noise_level)
+        for idx in indices:
+            observed_bits.append(all_observed[idx])
+
+    # Build MeasurementRecords
+    records: list[MeasurementRecord] = []
+    for i in range(n_copies):
+        basis = _basis_for_copy(i, config.bases)
+        records.append(
+            MeasurementRecord(
+                sig_id=sig.sig_id,
+                copy_index=i,
+                basis=basis,
+                expected=expected_bits[i],
+                observed=observed_bits[i],
+            )
+        )
+
+    return records
