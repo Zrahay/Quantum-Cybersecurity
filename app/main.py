@@ -642,7 +642,18 @@ def main() -> None:
         with st.spinner(f"Launching {attack_clicked} attack..."):
             try:
                 tampered_sig = attack_adv.attack(st.session_state.last_signature)
-                result = _run_full_pipeline(tampered_sig)
+                # Channel tamper's real signal is through noise_level, not bell_outcomes.
+                # Check if the adversary reports a noise_level override.
+                nl_override = getattr(attack_adv, 'noise_level_override', lambda: None)()
+                records = verify(
+                    tampered_sig, st.session_state.signer_key,
+                    noise_level=nl_override,
+                    core=st.session_state.quantum_core,
+                    config=st.session_state.config,
+                )
+                noise_floor = _calibrated_noise_floor(st.session_state.config)
+                result = evaluate(records, tampered_sig, st.session_state.seen_nonces, noise_floor=noise_floor)
+                st.session_state.seen_nonces.add(tampered_sig.nonce)
                 st.session_state.last_detection = result
                 _log_event(tampered_sig, result, attack_label=attack_clicked)
                 st.session_state.last_action = attack_clicked.lower().replace(" ", "_")
