@@ -20,6 +20,7 @@ from attacks.replay import ReplayAdversary
 from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
+from attacks.base import BaseAdversary
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -366,6 +367,106 @@ class TestRunBatch(unittest.TestCase):
         self.assertTrue((df["ops_match_rate"] <= 1.0).all())
         self.assertTrue((df["outcomes_match_rate"] >= 0.0).all())
         self.assertTrue((df["outcomes_match_rate"] <= 1.0).all())
+
+
+# ── Partial-key forgery (Phase 4) ─────────────────────────────────────
+
+class TestPartialKeyForgery(unittest.TestCase):
+
+    def test_protocol_conformance(self):
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        adv = PartialKeyForgeryAdversary(key_knowledge=0.5)
+        self.assertIsInstance(adv, BaseAdversary)
+        self.assertEqual(adv.threat, ThreatType.FORGERY)
+        self.assertIsNotNone(adv.name)
+
+    def test_zero_knowledge_matches_full_forgery(self):
+        """key_knowledge=0 should be equivalent to ForgeryAdversary."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        sig = _make_sig(n_bits=8)
+        adv = PartialKeyForgeryAdversary(key_knowledge=0.0)
+        result = adv.attack(sig)
+        # All ops should be random — none match original
+        ops_match = sum(
+            1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f
+        )
+        self.assertLess(ops_match, 6)  # expect ~2 out of 8
+
+    def test_full_knowledge_matches_original_ops(self):
+        """key_knowledge=1.0 should produce correct ops for all bits."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        sig = _make_sig(n_bits=8)
+        adv = PartialKeyForgeryAdversary(key_knowledge=1.0)
+        result = adv.attack(sig)
+        # All ops should match original
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_match_rate_scales_with_knowledge(self):
+        """Higher key_knowledge should produce higher ops match rate."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=16) for _ in range(15)]
+        low = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.2), sigs)
+        high = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.8), sigs)
+        self.assertGreater(
+            high["ops_match_rate"].mean(),
+            low["ops_match_rate"].mean(),
+        )
+
+    def test_expected_match_rate_range(self):
+        """Match rate should be between ~25% (random) and 100% (full knowledge)."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=16) for _ in range(15)]
+        df = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.5), sigs)
+        mean_rate = df["ops_match_rate"].mean()
+        # Expected: 0.5 * 1.0 + 0.5 * 0.25 = 0.625
+        self.assertGreater(mean_rate, 0.4)
+        self.assertLess(mean_rate, 0.85)
+
+    def test_invalid_knowledge_raises(self):
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        with self.assertRaises(ValueError):
+            PartialKeyForgeryAdversary(key_knowledge=1.5)
+        with self.assertRaises(ValueError):
+            PartialKeyForgeryAdversary(key_knowledge=-0.1)
+
+
+# ── Strength sweep (Phase 4) ──────────────────────────────────────────
+
+class TestSweep(unittest.TestCase):
+
+    def test_sweep_returns_dataframe(self):
+        from attacks.sweep import sweep_strength
+        import pandas as pd
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 0.5, 1.0])
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertGreater(len(df), 0)
+
+    def test_sweep_has_all_strengths(self):
+        from attacks.sweep import sweep_strength
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 0.5, 1.0])
+        self.assertEqual(set(df["strength"].unique()), {0.0, 0.5, 1.0})
+
+    def test_sweep_summary_groups_correctly(self):
+        from attacks.sweep import sweep_strength, summary_by_strength
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 1.0])
+        summary = summary_by_strength(df)
+        self.assertEqual(len(summary), 2)
+        self.assertIn("mean_ops_match_rate", summary.columns)
+        self.assertIn("std_ops_match_rate", summary.columns)
+
+    def test_key_knowledge_sweep_scales(self):
+        from attacks.sweep import sweep_key_knowledge, summary_by_key_knowledge
+        sigs = [_make_sig(n_bits=8) for _ in range(10)]
+        df = sweep_key_knowledge(sigs, knowledge_levels=[0.0, 0.5, 1.0])
+        summary = summary_by_key_knowledge(df)
+        # Match rate should increase with key knowledge
+        rates = summary.sort_values("key_knowledge")["mean_ops_match_rate"].tolist()
+        self.assertGreater(rates[-1], rates[0])
 
 
 if __name__ == "__main__":
