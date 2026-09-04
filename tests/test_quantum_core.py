@@ -148,39 +148,39 @@ class TestMockShapeAndValidation(unittest.TestCase):
             self.core.measure(self.core.bell_pairs(4), "Z")
 
 
-class TestM1AdapterRefusesRatherThanGuesses(unittest.TestCase):
-    """The gaps between what M2 wants and what core/ exposes, pinned down.
+@unittest.skipUnless(importlib.util.find_spec("qiskit"), "Qiskit not installed")
+class TestM1AdapterDelegatesToCore(unittest.TestCase):
+    """Real backend: shape only. Physics fidelity lives in tests/test_runtime.py.
 
-    Each of these is a TODO in quantum_interface.py. When Ashab lands the
-    corresponding M1 entry point, the assertion below fails -- which is the
-    signal to implement the adapter method and rewrite the test. A failure
-    here is progress, not a regression.
+    Skipped without Qiskit so M2's suite can still run where Aer is absent;
+    the adapter imports core/ lazily on purpose.
     """
 
     def setUp(self):
         self.core = M1QuantumCore()
 
-    def test_no_entanglement_resource_api_yet(self):
-        with self.assertRaises(QuantumCoreError):
-            self.core.bell_pairs(4)
+    def test_bell_pairs_returns_a_handle(self):
+        resource = self.core.bell_pairs(4)
+        self.assertIsNotNone(resource)
 
-    def test_teleport_returns_a_circuit_not_outcomes_yet(self):
-        with self.assertRaises(QuantumCoreError):
+    def test_teleport_returns_one_bit_pair_per_copy(self):
+        outcomes = self.core.teleport(self.core.bell_pairs(8))
+        self.assertEqual(len(outcomes), 8)
+        for pair in outcomes:
+            self.assertEqual(len(pair), 2)
+            self.assertTrue(all(bit in (0, 1) for bit in pair))
+
+    def test_measure_returns_classical_bits(self):
+        bits = self.core.measure(self.core.bell_pairs(8), Basis.Z)
+        self.assertEqual(len(bits), 8)
+        self.assertEqual(set(bits) - {0, 1}, set())
+
+    def test_teleport_rejects_a_non_batch_resource(self):
+        with self.assertRaises(TypeError):
             self.core.teleport(object())
 
-    def test_measure_in_basis_returns_none_yet(self):
-        with self.assertRaises(QuantumCoreError):
-            self.core.measure(object(), Basis.Z)
-
-    @unittest.skipUnless(importlib.util.find_spec("qiskit"), "Qiskit not installed")
     def test_correction_for_delegates_to_m1(self):
-        """The one method M1 already exposes. Shape only -- M1 owns the table.
-
-        Skipped rather than unconditional because `core.pauli` imports Qiskit
-        and the adapter imports it lazily on purpose: M2's suite must run in
-        an environment without Aer. If this test forces the import at module
-        scope, that property is lost.
-        """
+        """Shape only -- M1 owns the table."""
         self.assertIsInstance(self.core.correction_for((0, 0)), PauliOp)
 
 
