@@ -32,7 +32,9 @@ class ReplayAdversary(BaseAdversary):
         strength: float = 1.0,
     ) -> None:
         super().__init__(strength=strength)
-        self._seen_nonces: set[str] = seen_nonces if seen_nonces is not None else set()
+        # Copy to avoid aliasing — the caller's set must not be mutated by
+        # attack() calls (see ordering note in detection.detector docstring).
+        self._seen_nonces: set[str] = set(seen_nonces) if seen_nonces is not None else set()
 
     @property
     def seen_nonces(self) -> set[str]:
