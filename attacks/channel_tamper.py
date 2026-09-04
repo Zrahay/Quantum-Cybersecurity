@@ -37,6 +37,7 @@ No AI/ML is used.
 from __future__ import annotations
 
 import random
+import uuid
 
 from attacks.base import BaseAdversary
 from contracts import Signature, ThreatType
@@ -67,7 +68,7 @@ class ChannelTamperAdversary(BaseAdversary):
             message=sig.message,
             declared_ops=sig.declared_ops,
             bell_outcomes=tuple(tampered_outcomes),
-            nonce=sig.nonce,
+            nonce=uuid.uuid4().hex,
             timestamp=sig.timestamp,
         )
 
