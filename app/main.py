@@ -175,6 +175,11 @@ def _init_state() -> None:
         "last_detection": None,
         "quantum_core": M1QuantumCore(),
         "config": QDSConfig(bases=(Basis.Z, Basis.X)),
+        # The number of message bits the active key was generated for.
+        # Independent of n_copies (L) -- P1's message_length and its
+        # security parameter L are two different dials. Tracked here
+        # rather than read off KeyPair, which doesn't expose it publicly.
+        "message_length": 4,
         "message_input": "1010",
         "last_action": None,
         "action_timestamp": None,
@@ -312,7 +317,20 @@ with st.sidebar:
         max_value=256,
         value=st.session_state.config.n_copies,
         step=1,
-        help="Number of signature copies per verifier. Higher L = stronger security.",
+        help="Number of signature copies per verifier, per message bit. Higher L = stronger security.",
+    )
+
+    message_length = st.number_input(
+        "Message length (bits)",
+        min_value=1,
+        max_value=32,
+        value=st.session_state.message_length,
+        step=1,
+        help=(
+            "How many message bits this key can sign. Independent of L: "
+            "P1 needs 2 * message_length * L key elements, one L-sized "
+            "sequence pair per message bit position."
+        ),
     )
 
     if st.button("🔑 Generate Keys", type="primary", use_container_width=True):
@@ -322,19 +340,25 @@ with st.sidebar:
                 n_copies=n_copies,
                 bases=(Basis.Z, Basis.X),
             )
-            # The current M2 scaffold represents one signature bit per copy.
-            # Keep the dashboard input valid for that contract rather than
-            # letting verify() expose a ValueError traceback to the user.
-            st.session_state.message_input = "10" * (n_copies // 2) + ("1" if n_copies % 2 else "")
+            st.session_state.message_length = message_length
+            # Keep the dashboard input valid for the active key's
+            # message_length rather than letting sign() raise a
+            # ValueError the user has to decode from a traceback.
+            st.session_state.message_input = "10" * (message_length // 2) + ("1" if message_length % 2 else "")
             st.session_state.quantum_core = M1QuantumCore()
-            st.session_state.signer_key = keygen(signer_id, n_copies, core=st.session_state.quantum_core, config=st.session_state.config)
+            st.session_state.signer_key = keygen(
+                signer_id, n_copies,
+                message_length=message_length,
+                core=st.session_state.quantum_core,
+                config=st.session_state.config,
+            )
             st.session_state.seen_nonces.clear()
             st.session_state.event_log.clear()
             st.session_state.last_signature = None
             st.session_state.last_detection = None
             st.session_state.last_action = "keygen"
             st.session_state.action_timestamp = time.time()
-        st.success(f"Generated key for **{signer_id}** with L = **{n_copies}**")
+        st.success(f"Generated key for **{signer_id}** with L = **{n_copies}**, message length = **{message_length}** bits")
         st.rerun()
 
     st.markdown("---")
@@ -481,12 +505,12 @@ def main() -> None:
         st.error("❌ Message must contain only 0 and 1 (at least one bit)")
         return
 
-    required_length = st.session_state.signer_key.n_copies
+    required_length = st.session_state.message_length
     if len(message_bits) != required_length:
         st.error(
-            f"❌ This protocol build needs exactly **{required_length} bits** for the active "
-            f"key (L = {required_length}). Generate a new key with a different L to use a "
-            "different message length."
+            f"❌ The active key was generated for **{required_length}-bit** messages. "
+            "Generate a new key with a different message length in the sidebar to sign "
+            "a message of this length."
         )
         return
 
