@@ -22,7 +22,7 @@ from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
 from detection.detector import evaluate
-from protocol import keygen, sign, verify, QDSConfig, MockQuantumCore
+from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +173,7 @@ def _init_state() -> None:
         "seen_nonces": set(),
         "last_signature": None,
         "last_detection": None,
-        "quantum_core": MockQuantumCore(),
+        "quantum_core": M1QuantumCore(),
         "config": QDSConfig(bases=(Basis.Z, Basis.X)),
         "message_input": "1010",
         "last_action": None,
@@ -326,7 +326,7 @@ with st.sidebar:
             # Keep the dashboard input valid for that contract rather than
             # letting verify() expose a ValueError traceback to the user.
             st.session_state.message_input = "10" * (n_copies // 2) + ("1" if n_copies % 2 else "")
-            st.session_state.quantum_core = MockQuantumCore()
+            st.session_state.quantum_core = M1QuantumCore()
             st.session_state.signer_key = keygen(signer_id, n_copies, core=st.session_state.quantum_core, config=st.session_state.config)
             st.session_state.seen_nonces.clear()
             st.session_state.event_log.clear()
