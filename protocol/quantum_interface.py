@@ -141,38 +141,25 @@ def check_quantum_core(core: object) -> QuantumCore:
 
 
 class M1QuantumCore:
-    """Adapter over `core/`. The real backend, once M1 fills its stubs in.
+    """Thin adapter over `core/`. The real QuantumCore backend.
 
-    Holds no state and owns no logic -- it exists only so that M2 depends on
-    an interface it controls rather than on M1's module layout. Every method
-    is one line of delegation, or an honest refusal.
-
-    `core.*` is imported lazily inside the methods, not at module scope,
-    because `core.pauli` imports Qiskit. Deferring it keeps `import protocol`
-    -- and therefore M2's entire test suite -- working in an environment
-    where Qiskit is not installed. Deleting the local imports will make the
-    M2 tests depend on Aer for no benefit.
+    Holds no state and owns no logic -- every method delegates to core.runtime
+    or core.pauli. `core.*` is imported lazily so `import protocol` still works
+    without Qiskit/Aer; *calling* these methods requires them.
     """
 
     def bell_pairs(self, n: int, *, noise_level: float = 0.0) -> EntanglementResource:
-        # TODO(M1 seam): M1 exposes `teleportation_circuit(noise_level)`, a
-        # circuit BUILDER, and no entanglement-resource entry point. Agree
-        # one with Ashab before implementing -- do not guess here.
-        raise QuantumCoreError(
-            "core/ exposes no entanglement-resource API yet; use MockQuantumCore "
-            "for development, or agree an M1 entry point first"
-        )
+        from core.runtime import prepare_batch
+
+        return prepare_batch(n, noise_level)
 
     def teleport(
         self, resource: EntanglementResource, *, noise_level: float = 0.0
     ) -> list[tuple[int, int]]:
-        # TODO(M1 seam): needs whoever runs the circuit to preserve per-shot
-        # ordering and convert Qiskit's little-endian counts into the frozen
-        # (clbit0, clbit1) order. See the docstring on QuantumCore.teleport.
-        raise QuantumCoreError(
-            "core.teleportation exposes a circuit builder, not Bell outcomes; "
-            "running it and fixing bit order is an M1 decision, not M2's guess"
-        )
+        from core.runtime import run_teleport_bell_outcomes
+
+        # Call-site noise wins over the batch default (verify threads it in).
+        return run_teleport_bell_outcomes(resource, noise_level=noise_level)
 
     def correction_for(self, bell_outcome: tuple[int, int]) -> PauliOp:
         from core.pauli import correction_for
@@ -182,10 +169,6 @@ class M1QuantumCore:
     def measure(
         self, resource: EntanglementResource, basis: Basis, *, noise_level: float = 0.0
     ) -> list[int]:
-        # TODO(M1 seam): `core.measurements.measure_in_basis` mutates a
-        # circuit in place and returns None. M2 needs the resulting per-copy
-        # bits, in order.
-        raise QuantumCoreError(
-            "core.measurements.measure_in_basis returns None (it mutates a circuit); "
-            "M2 needs per-copy measured bits, which M1 does not expose yet"
-        )
+        from core.runtime import run_measure_bits
+
+        return run_measure_bits(resource, basis, noise_level=noise_level)
