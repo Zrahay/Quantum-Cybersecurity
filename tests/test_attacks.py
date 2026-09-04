@@ -179,6 +179,33 @@ class TestForgery(unittest.TestCase):
         # Random Pauli ops against random ops: ~25% per-bit match chance
         self.assertLess(avg_ops_match, 0.5)
 
+    def test_full_forgery_touches_the_real_element_count_not_just_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) would leave
+        every element past the first few untouched even at strength=1.0.
+        """
+        n_elements = 300  # far more than any plausible message length
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),  # 3 bits -- much shorter than n_elements
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        adv = ForgeryAdversary(strength=1.0)
+        result = adv.attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
+        ops_match = sum(
+            1 for o, f in zip(realistic_sig.declared_ops, result.declared_ops)
+            if o == f
+        )
+        # Full-strength forgery on 300 random-Pauli elements: ~25% match by
+        # chance. The old bug would have left ~297 of 300 untouched (only
+        # indices 0..2 were ever forge-eligible), giving ops_match near 300.
+        self.assertLess(ops_match, 150)
+
 
 # ── Channel Tamper ───────────────────────────────────────────────────────
 
@@ -301,6 +328,23 @@ class TestImpersonation(unittest.TestCase):
         adv = ImpersonationAdversary()
         result = adv.attack(sig)
         self.assertEqual(len(result.declared_ops), 6)
+
+    def test_ops_length_matches_the_real_element_count_not_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) undersized
+        both declared_ops and bell_outcomes to the message length."""
+        n_elements = 300
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        result = ImpersonationAdversary().attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
 
     def test_different_ops_each_time(self):
         sig = _make_sig()
