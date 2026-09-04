@@ -37,6 +37,7 @@ No AI/ML is used.
 from __future__ import annotations
 
 import random
+import uuid
 
 from attacks.base import BaseAdversary
 from contracts import Signature, ThreatType
