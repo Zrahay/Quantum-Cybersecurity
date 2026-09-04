@@ -82,7 +82,11 @@ class MockQuantumCore:
         return MockResource(n_pairs=n, noise_level=noise_level)
 
     def teleport(
-        self, resource: MockResource, *, noise_level: float = 0.0
+        self,
+        resource: MockResource,
+        preparations: Sequence[tuple[Basis, int]] | None = None,
+        *,
+        noise_level: float = 0.0,
     ) -> list[tuple[int, int]]:
         """Uniform random (clbit0, clbit1) pairs, one per pair in `resource`.
 
@@ -90,7 +94,23 @@ class MockQuantumCore:
         real Bell measurement this reproduces, and it is reproduced because
         an unbalanced draw would make M4's chi-square scaffolding look
         broken during development -- not because it makes this physical.
+
+        `preparations`, when given, is validated for shape but otherwise
+        IGNORED: a real Bell outcome is independent of what's teleported
+        (no-signaling), which is exactly why this uniform draw is correct
+        physics regardless of `preparations` -- see the real Aer path,
+        pinned to the same independence in tests/test_runtime.py.
         """
+        if preparations is not None:
+            if len(preparations) != resource.n_pairs:
+                raise ValueError(
+                    f"preparations length {len(preparations)} does not match "
+                    f"batch size {resource.n_pairs}"
+                )
+            for i, (basis, bit) in enumerate(preparations):
+                _require_basis(basis, f"preparations[{i}][0]")
+                if bit not in (0, 1):
+                    raise ValueError(f"preparations[{i}][1] must be a bit; got {bit!r}")
         return [
             (self._rng.getrandbits(1), self._rng.getrandbits(1))
             for _ in range(resource.n_pairs)

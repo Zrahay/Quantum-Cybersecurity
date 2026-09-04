@@ -85,6 +85,22 @@ class TestRunTeleportBellOutcomes(unittest.TestCase):
         with self.assertRaises(TypeError):
             run_teleport_bell_outcomes(object())  # type: ignore[arg-type]
 
+    def test_accepts_real_preparations(self):
+        """sign() teleports Alice's real per-element content, not a
+        placeholder |0> -- this is the shape it needs (same as
+        teleport_and_measure's preparations argument)."""
+        n = 12
+        preps = [(Basis.Z, i % 2) for i in range(n)]
+        outcomes = run_teleport_bell_outcomes(prepare_batch(n), preps, seed=SEED)
+        self.assertEqual(len(outcomes), n)
+        for pair in outcomes:
+            self.assertEqual(len(pair), 2)
+            self.assertTrue(all(bit in (0, 1) for bit in pair))
+
+    def test_preparations_length_mismatch_raises(self):
+        with self.assertRaises(ValueError):
+            run_teleport_bell_outcomes(prepare_batch(8), [(Basis.Z, 0)] * 5, seed=SEED)
+
 
 class TestRunMeasureBits(unittest.TestCase):
     def test_returns_classical_bits(self):

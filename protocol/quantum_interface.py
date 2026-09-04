@@ -84,9 +84,18 @@ class QuantumCore(Protocol):
         ...
 
     def teleport(
-        self, resource: EntanglementResource, *, noise_level: float = 0.0
+        self,
+        resource: EntanglementResource,
+        preparations: Sequence[tuple[Basis, int]] | None = None,
+        *,
+        noise_level: float = 0.0,
     ) -> list[tuple[int, int]]:
         """Teleport through `resource`, returning the Bell-measurement outcomes.
+
+        `preparations[i]`, when given, is the (basis, bit) Pauli eigenstate
+        teleported for copy i. `None` (the default) teleports |0> for every
+        copy -- the original, message-less contract this method started
+        with; every existing caller that omits it is unaffected.
 
         M2 expects: one (clbit0, clbit1) pair per teleported qubit, in
         CIRCUIT ORDER -- control qubit's bit FIRST. That is the frozen
@@ -196,12 +205,18 @@ class M1QuantumCore:
         return prepare_batch(n, noise_level)
 
     def teleport(
-        self, resource: EntanglementResource, *, noise_level: float = 0.0
+        self,
+        resource: EntanglementResource,
+        preparations: Sequence[tuple[Basis, int]] | None = None,
+        *,
+        noise_level: float = 0.0,
     ) -> list[tuple[int, int]]:
         from core.runtime import run_teleport_bell_outcomes
 
         # Call-site noise wins over the batch default (verify threads it in).
-        return run_teleport_bell_outcomes(resource, noise_level=noise_level, seed=self.seed)
+        return run_teleport_bell_outcomes(
+            resource, preparations, noise_level=noise_level, seed=self.seed
+        )
 
     def correction_for(self, bell_outcome: tuple[int, int]) -> PauliOp:
         from core.pauli import correction_for

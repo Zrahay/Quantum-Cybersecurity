@@ -152,8 +152,13 @@ def sign(
         attacker would have to reproduce for the SIBLING sequence, which was
         never revealed either.
       * `bell_outcomes` -- Alice's Bell-measurement results from teleporting
-        the revealed elements, which the recipient needs to apply the right
-        Pauli correction.
+        the revealed elements' REAL prepared eigenstates (not a placeholder
+        |0>; `core.teleport` takes the same `preparations` shape as
+        `teleport_and_measure`), which the recipient needs to apply the
+        right Pauli correction. Note that today's `verify()` still
+        re-derives its own measurement from the key material rather than
+        consuming this value -- see protocol/verifier.py -- so this field
+        is honest data, not yet something verify() is causally driven by.
 
     Raises:
         QuantumCoreError: if `core` does not satisfy the interface.
@@ -178,16 +183,25 @@ def sign(
         )
 
     declared_ops: list = []
+    preparations: list = []
     for i, bit in enumerate(message):
         seq = 2 * i + bit
-        declared_ops.extend(key.pauli_map[seq * n_copies : (seq + 1) * n_copies])
+        start, end = seq * n_copies, (seq + 1) * n_copies
+        declared_ops.extend(key.pauli_map[start:end])
+        preparations.extend(
+            (basis_of(op), b)
+            for op, b in zip(key.pauli_map[start:end], key.private_bits[start:end])
+        )
     n_revealed = len(declared_ops)
 
-    # Teleport the revealed elements to the recipient and keep Alice's Bell
-    # outcomes. The recipient's own measurement happens in verify(); see the
-    # note there on why the two halves are not one shot.
+    # Teleport the revealed elements -- Alice's REAL per-element content,
+    # not a placeholder -- and keep her Bell outcomes. The recipient's own
+    # measurement happens in verify(); see the note there on why the two
+    # halves are not one shot.
     resource = core.bell_pairs(n_revealed, noise_level=config.noise_level)
-    bell_outcomes = tuple(core.teleport(resource, noise_level=config.noise_level))
+    bell_outcomes = tuple(
+        core.teleport(resource, preparations, noise_level=config.noise_level)
+    )
     if len(bell_outcomes) != n_revealed:
         raise ValueError(
             f"core returned {len(bell_outcomes)} Bell outcomes for {n_revealed} elements"

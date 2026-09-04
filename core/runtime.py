@@ -92,19 +92,36 @@ def _run_one(qc: QuantumCircuit, *, seed: int | None) -> str:
 
 def run_teleport_bell_outcomes(
     batch: EntanglementBatch,
+    preparations: Sequence[tuple[Basis, int]] | None = None,
     *,
     noise_level: float | None = None,
     seed: int | None = None,
 ) -> list[tuple[int, int]]:
     """One (clbit0, clbit1) pair per copy, circuit order, independent shots.
 
-    Message defaults to |0⟩ -- QuantumCore.teleport has no message argument.
+    `preparations[i]`, when given, is the (basis, bit) Pauli eigenstate
+    teleported for copy i -- added so `sign()` can teleport Alice's real
+    per-element content instead of a placeholder. `None` (the default,
+    and the only behaviour before this parameter existed) teleports |0>
+    for every copy, matching QuantumCore.teleport's original no-message
+    contract; every existing caller that doesn't pass it is unaffected.
     """
     batch = _require_batch(batch)
     level = _resolve_noise(batch, noise_level)
+    if preparations is not None and len(preparations) != batch.n_pairs:
+        raise ValueError(
+            f"preparations length {len(preparations)} does not match batch "
+            f"size {batch.n_pairs}"
+        )
     outcomes: list[tuple[int, int]] = []
     for i in range(batch.n_pairs):
-        qc = teleportation_circuit(noise_level=level)
+        qc = QuantumCircuit(3, 3) if preparations is not None else None
+        if preparations is not None:
+            prep_basis, prep_bit = preparations[i]
+            prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
+            qc.compose(teleportation_circuit(noise_level=level), inplace=True)
+        else:
+            qc = teleportation_circuit(noise_level=level)
         # Reserve Bob's clbit so the memory string is always length 3 and
         # endian indexing matches forgery / measure.
         qc.measure(_BOB_QUBIT, _BOB_QUBIT)
