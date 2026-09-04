@@ -224,6 +224,54 @@ class TestChannelTamper(unittest.TestCase):
         result = adv.attack(sig)
         self.assertEqual(result.message, sig.message)
 
+    def test_noise_level_override_reports_strength(self):
+        """The real, verify()-visible detection mechanism -- see the module
+        docstring on why the bell_outcomes flip above is not enough on its
+        own to be caught by M2's verify()."""
+        for strength in (0.0, 0.3, 1.0):
+            adv = ChannelTamperAdversary(strength=strength)
+            self.assertEqual(adv.noise_level_override(), strength)
+
+    def test_other_adversaries_do_not_override_noise_level(self):
+        """noise_level_override() defaults to None: only channel tampering
+        is a property of the physical channel rather than the Signature."""
+        for adv in (ReplayAdversary(), ForgeryAdversary(), ImpersonationAdversary()):
+            with self.subTest(adversary=adv.name):
+                self.assertIsNone(adv.noise_level_override())
+
+    def test_detectable_through_verify_only_when_noise_level_is_threaded(self):
+        """End-to-end: attack(sig) alone is invisible to M2's real verify();
+        threading noise_level_override() through is what makes it visible.
+
+        This is the regression guard for the finding that motivated
+        noise_level_override() in the first place -- bell_outcomes tampering
+        alone produces zero mismatch-rate change because verify() never
+        reads that field.
+        """
+        from detection.statistics import mismatch_rate
+        from protocol import MockQuantumCore, QDSConfig, keygen, sign, verify
+
+        L, m = 300, 2
+        cfg = QDSConfig(n_copies=L, seed=3)
+        core = MockQuantumCore(seed=3)
+        key = keygen("alice", L, message_length=m, core=core, config=cfg)
+        sig = sign((1, 0), key, core=core, config=cfg)
+
+        adv = ChannelTamperAdversary(strength=0.6)
+        tampered = adv.attack(sig)
+
+        blind_records = verify(tampered, key, core=core, config=cfg)
+        self.assertEqual(mismatch_rate(blind_records), 0.0,
+                          "bell_outcomes tampering alone should NOT be visible")
+
+        threaded_records = verify(
+            tampered, key, core=core, config=cfg,
+            noise_level=adv.noise_level_override(),
+        )
+        self.assertGreater(mismatch_rate(threaded_records), 0.05,
+                            "threading noise_level_override() should make the "
+                            "attack visible")
+
 
 # ── Impersonation ────────────────────────────────────────────────────────
 
