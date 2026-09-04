@@ -14,7 +14,7 @@ replace them.
 import dataclasses
 import unittest
 
-from contracts import Basis, KeyPair, PauliOp, Signature
+from contracts import KeyPair, PauliOp, Signature
 from detection.statistics import mismatch_rate
 from protocol import (
     MockQuantumCore,
@@ -27,8 +27,7 @@ from protocol import (
     verify,
 )
 
-STRICT = QDSConfig(strict=True, bases=(Basis.Z,))
-DEFAULT_BASES = (Basis.Z, Basis.X)
+STRICT = QDSConfig(strict=True)
 
 
 class TestKeygen(unittest.TestCase):
@@ -110,16 +109,20 @@ class TestSign(unittest.TestCase):
 class TestVerify(unittest.TestCase):
     def setUp(self):
         self.key = keygen("alice", 8)
-        # Message length must equal key.n_copies (L copies, one per message bit)
-        self.sig = sign((1, 0, 1, 1, 0, 1, 0, 1), self.key)
+        self.sig = sign((1, 0, 1), self.key)
 
-    def test_returns_records_for_legitimate_signature(self):
-        """Verifier returns measurement records for legitimate signatures."""
-        records = verify(self.sig, self.key, config=QDSConfig(bases=DEFAULT_BASES))
-        self.assertEqual(len(records), 8)
-        for r in records:
-            self.assertEqual(r.sig_id, self.sig.sig_id)
-            self.assertIn(r.basis, DEFAULT_BASES)
+    def test_returns_no_records_which_fails_closed(self):
+        """Empty is correct for an unimplemented verifier, and it fails CLOSED.
+
+        The pairing with M4 is the point: mismatch_rate raises on an empty
+        list rather than reporting 0.0, so an unimplemented verifier cannot
+        accept anything. If someone "fixes" this by fabricating records, that
+        ValueError disappears and every forgery sails through `r < s_a`.
+        """
+        records = verify(self.sig, self.key)
+        self.assertEqual(records, [])
+        with self.assertRaises(ValueError):
+            mismatch_rate(records)
 
     def test_does_not_validate_the_signature(self):
         """A tampered signature must come back as data, not as an exception.
@@ -133,23 +136,21 @@ class TestVerify(unittest.TestCase):
             sig_id="sig-forged",
             key_id="key-not-alices",
             signer_id="eve",
-            message=(1, 0, 1, 1, 0, 1, 0, 1),
-            declared_ops=(PauliOp.X,) * 8,
-            bell_outcomes=((1, 1),) * 8,
+            message=(1, 0, 1),
+            declared_ops=(PauliOp.X,) * 3,
+            bell_outcomes=((1, 1),) * 3,
             nonce="reused-nonce",
             timestamp=0.0,
         )
-        records = verify(forged, self.key, config=QDSConfig(bases=DEFAULT_BASES))
-        self.assertEqual(len(records), 8)
+        self.assertEqual(verify(forged, self.key), [])
 
     def test_noise_level_defaults_to_config(self):
-        records = verify(self.sig, self.key, config=QDSConfig(noise_level=0.3, bases=DEFAULT_BASES))
-        self.assertEqual(len(records), 8)
+        self.assertEqual(verify(self.sig, self.key, config=QDSConfig(noise_level=0.3)), [])
 
     def test_explicit_noise_level_is_range_checked(self):
         for level in (-0.1, 1.5):
             with self.subTest(level=level), self.assertRaises(ValueError):
-                verify(self.sig, self.key, level, config=QDSConfig(bases=DEFAULT_BASES))
+                verify(self.sig, self.key, level)
 
 
 class TestStrictModeReportsTheMissingAlgorithm(unittest.TestCase):
@@ -198,9 +199,8 @@ class TestDependencyInjection(unittest.TestCase):
     def test_entry_points_accept_a_quantum_core(self):
         core = MockQuantumCore(seed=1)
         key = keygen("alice", 8, core=core)
-        sig = sign((1, 0, 1, 1, 0, 1, 0, 1), key, core=core)
-        records = verify(sig, key, core=core, config=QDSConfig(bases=DEFAULT_BASES))
-        self.assertEqual(len(records), 8)
+        sig = sign((1, 0, 1), key, core=core)
+        self.assertEqual(verify(sig, key, core=core), [])
 
     def test_core_is_optional_while_the_algorithm_is_unselected(self):
         self.assertIsInstance(keygen("alice", 8), KeyPair)
@@ -212,7 +212,7 @@ class TestDependencyInjection(unittest.TestCase):
         calls = {
             "keygen": lambda: keygen("alice", 8, core=object()),
             "sign": lambda: sign((1,), key, core="not a core"),
-            "verify": lambda: verify(sig, key, core=object(), config=QDSConfig(bases=DEFAULT_BASES)),
+            "verify": lambda: verify(sig, key, core=object()),
         }
         for entry, call in calls.items():
             with self.subTest(entry=entry), self.assertRaises(QuantumCoreError):
