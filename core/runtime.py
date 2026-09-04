@@ -11,6 +11,7 @@ mock), which matches M4's Hoeffding independence assumption on L copies.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from qiskit import QuantumCircuit
@@ -23,6 +24,7 @@ from core.teleportation import teleportation_circuit
 
 # Bob's qubit / classical bit in teleportation_circuit (3q, 3c).
 _BOB_QUBIT = 2
+_MESSAGE_QUBIT = 0
 
 
 @dataclass(frozen=True)
@@ -130,3 +132,99 @@ def run_measure_bits(
         shot_seed = None if seed is None else seed + i
         bits.append(bob_bit_from_memory(_run_one(qc, seed=shot_seed)))
     return bits
+
+
+def prepare_pauli_eigenstate(
+    circuit: QuantumCircuit, qubit: int, basis: Basis, bit: int
+) -> None:
+    """Prepare an eigenstate of the named Pauli on `qubit`, in place.
+
+    `bit` selects the eigenvalue, and the convention is the one frozen in
+    contracts.MeasurementRecord: bit 0 is the +1 eigenstate, bit 1 the -1
+    eigenstate. Never +1/-1 themselves.
+
+        Z: |0>, |1>        X: |+>, |->        Y: |+i>, |-i>
+
+    This is the exact inverse of `measure_in_basis`: prepare in a basis,
+    measure in the SAME basis, and on an ideal channel you get `bit` back
+    with certainty. Measure in a different basis and the outcome is
+    uniformly random -- which is the whole mechanism the signature
+    verification rests on, so the two functions must stay inverse. There is
+    a round-trip test per (basis, bit) pair in tests/test_runtime.py.
+    """
+    if qubit < 0 or qubit >= circuit.num_qubits:
+        raise ValueError(
+            f"qubit index {qubit} out of range for circuit with "
+            f"{circuit.num_qubits} qubits"
+        )
+    if not isinstance(basis, Basis):
+        raise TypeError(f"basis must be a contracts.Basis, got {type(basis).__name__}")
+    if bit not in (0, 1):
+        raise ValueError(f"bit must be a classical bit 0 or 1; got {bit!r}")
+
+    if bit:
+        circuit.x(qubit)
+    if basis is Basis.Z:
+        return
+    if basis is Basis.X:
+        circuit.h(qubit)
+        return
+    if basis is Basis.Y:
+        # measure_in_basis(Y) undoes this with sdg then h.
+        circuit.h(qubit)
+        circuit.s(qubit)
+        return
+    raise ValueError(f"unknown Basis: {basis!r}")
+
+
+def run_teleport_and_measure(
+    batch: EntanglementBatch,
+    preparations: Sequence[tuple[Basis, int]],
+    bases: Sequence[Basis],
+    *,
+    noise_level: float | None = None,
+    seed: int | None = None,
+) -> list[tuple[tuple[int, int], int]]:
+    """Prepare, teleport and measure each copy in ONE shot.
+
+    Returns ((clbit0, clbit1), bob_bit) per copy, in copy order.
+
+    WHY THIS EXISTS SEPARATELY from run_teleport_bell_outcomes and
+    run_measure_bits: those two run independent shots, so a Bell outcome
+    from one and a measured bit from the other belong to different copies
+    and are uncorrelated. A signature protocol needs the Bell outcome and
+    the recipient's measured bit FROM THE SAME teleportation, because the
+    correction implied by that outcome is what makes the measured bit
+    meaningful. Splitting them across two runs silently produces a 50%
+    mismatch rate on legitimate signatures.
+
+    `preparations[i]` is the (basis, bit) Pauli eigenstate the sender puts
+    on the message qubit; `bases[i]` is the basis the recipient measures
+    Bob's qubit in. Both must be as long as the batch.
+    """
+    batch = _require_batch(batch)
+    if len(preparations) != batch.n_pairs:
+        raise ValueError(
+            f"preparations length {len(preparations)} does not match batch "
+            f"size {batch.n_pairs}"
+        )
+    if len(bases) != batch.n_pairs:
+        raise ValueError(
+            f"bases length {len(bases)} does not match batch size {batch.n_pairs}"
+        )
+    level = _resolve_noise(batch, noise_level)
+
+    results: list[tuple[tuple[int, int], int]] = []
+    for i, ((prep_basis, prep_bit), meas_basis) in enumerate(zip(preparations, bases)):
+        if not isinstance(meas_basis, Basis):
+            raise TypeError(
+                f"bases[{i}] must be a contracts.Basis, got {type(meas_basis).__name__}"
+            )
+        qc = QuantumCircuit(3, 3)
+        prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
+        qc.compose(teleportation_circuit(noise_level=level), inplace=True)
+        measure_in_basis(qc, _BOB_QUBIT, meas_basis)
+        shot_seed = None if seed is None else seed + i
+        memory = _run_one(qc, seed=shot_seed)
+        results.append((bell_bits_from_memory(memory), bob_bit_from_memory(memory)))
+    return results

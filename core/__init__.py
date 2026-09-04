@@ -12,7 +12,9 @@ from core.runtime import (
     bell_bits_from_memory,
     bob_bit_from_memory,
     prepare_batch,
+    prepare_pauli_eigenstate,
     run_measure_bits,
+    run_teleport_and_measure,
     run_teleport_bell_outcomes,
 )
 from core.teleportation import teleportation_circuit
@@ -27,9 +29,11 @@ __all__ = [
     "create_bell_circuit",
     "measure_in_basis",
     "prepare_batch",
+    "prepare_pauli_eigenstate",
     "records_from_shots",
     "run_bell_experiment",
     "run_measure_bits",
+    "run_teleport_and_measure",
     "run_teleport_bell_outcomes",
     "teleportation_circuit",
 ]
