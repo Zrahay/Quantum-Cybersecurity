@@ -196,14 +196,19 @@ Three layers, all load-bearing:
 
 ## Stated limitations (belong in D1, openly)
 
-1. **One-time key, one message.** P1 is a one-time signature: Alice needs an
-   independent `L`-element sequence for each `(message bit position, bit value)`
-   pair, so signing an `m`-bit message consumes `2m` sequences. The frozen
-   `KeyPair` holds exactly one sequence, so one `KeyPair` here signs one
-   message, and the message is bound to the signature classically rather than
-   by which key sequence is revealed. **Key reuse across messages is not
-   prevented by this implementation.** Fixing it needs a `KeyPair` able to hold
-   `2mL` elements — a Decision Log item. Until then, one key, one message.
+1. **Message binding.** `keygen(..., message_length=m)` generates
+   `2*m` independent `L`-element sequences — one per `(message bit position,
+   bit value)` pair — and `sign()` reveals classical data for exactly the `m`
+   sequences matching the actual message, `sequence(i, message[i])`. A
+   signature re-presented against a different message routes `verify()`'s
+   lookup onto the sibling, never-revealed sequence, which is independently
+   random from the true one — the same ~1/4-mismatch forgery-detection math
+   catches a message swap as catches a blind key guess. See
+   `tests/test_signature.py::TestMessageBinding`. This is additive to the
+   frozen `contracts.KeyPair` (only the length relationship between
+   `pauli_map`/`private_bits` and `n_copies` changed, from `L` to `2mL`; no
+   field was added or renamed), so no Decision Log item for the schema
+   itself — flagging the mechanism in D1 as new is still worth doing.
 
 2. **Replay detection is not quantum.** No-cloning means the quantum state
    cannot be copied and resent, so a replay is necessarily a reused *classical*
@@ -212,24 +217,27 @@ Three layers, all load-bearing:
 
 3. **Hoeffding assumes independent measurement outcomes**, and chi-square needs
    an expected count of at least 5 per cell. The independence is justified here:
-   each element's basis and bit are drawn independently in `keygen`, so the
-   recipient's `L` measurement outcomes are independent too. Correlating them
-   would invalidate the bound while leaving every test passing. Both
-   assumptions belong in D1, stated explicitly, not buried.
+   every element's basis and bit — across all `2m` sequences — are drawn
+   independently in `keygen`, so the recipient's measurement outcomes are
+   independent too. Correlating them would invalidate the bound while leaving
+   every test passing. Both assumptions belong in D1, stated explicitly, not
+   buried.
 
-4. **`verify()` is `O(L)`** in measurements, with no per-copy re-derivation of
-   the key. Low computational complexity is a stated requirement of the problem
-   statement; put the count in D1.
+4. **`verify()` is `O(mL)`** in measurements — `m` message bits times `L`
+   copies per bit — with no per-copy re-derivation of the key. Low
+   computational complexity is a stated requirement of the problem statement;
+   put the count in D1.
 
 ## Open items
 
-1. **M3 coordination.** `sign()` returns `L`-length `declared_ops` and
-   `bell_outcomes`, but M3's adversaries currently size their mutations off
-   `len(sig.message)`. A real signature's `message` is short (e.g. `(1, 0, 1)`)
-   while its `declared_ops` is length `L`, so M3's forgery only touches the
-   first few elements. That is an M3 follow-up, not an M2 bug, but it needs
-   agreeing before the demo.
+1. **M3 coordination.** `sign()` returns `message_length * L`-length
+   `declared_ops` and `bell_outcomes` (previously flagged here as `L`-length;
+   now scaled by message length too), but M3's adversaries currently size
+   their mutations off `len(sig.message)`. A real signature's `message` is
+   short (e.g. `(1, 0, 1)`, `message_length=3`) while its `declared_ops` is
+   length `3*L`, so M3's forgery only touches the first few elements. That is
+   an M3 follow-up, not an M2 bug, but it needs agreeing before the demo.
 2. **`contracts.KeyPair.pauli_map` comment.** Says "message bit -> required
    correction"; P1 uses it as "which Pauli this element is an eigenstate of".
    The type is unchanged; correcting the comment is a Decision Log item.
-3. **Per-message-bit key material.** See limitation 1 above.
+3. ~~Per-message-bit key material.~~ Done — see "Message binding" above.

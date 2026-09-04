@@ -12,9 +12,15 @@ internals without breaking five people:
 
     from protocol import keygen, sign, verify
 
-    key = keygen("alice", n_copies=64)
+    key = keygen("alice", n_copies=64, message_length=3)  # 3 bits: (1, 0, 1)
     sig = sign((1, 0, 1), key)
     records = verify(sig, key)          # -> list[MeasurementRecord] for M4
+
+`message_length` must match `len(message)` at `sign` time -- it fixes how
+many independent (bit=0, bit=1) sequence pairs `keygen` draws. This is also
+the message-binding mechanism: `sign` reveals only the sequence matching
+each actual bit value, so re-presenting the signature against a different
+message routes `verify` onto the never-revealed sibling sequence instead.
 
 M2 does NOT own, and must not start doing:
   * accept/reject decisions, thresholds, or any statistics -- M4
@@ -22,7 +28,7 @@ M2 does NOT own, and must not start doing:
   * adversarial mutation of signatures -- M3
 
 See protocol/README.md for the protocol, the mapping onto the frozen
-contracts, and the two stated limitations.
+contracts, and the stated limitations.
 """
 
 from .bb84 import basis_of, pauli_of

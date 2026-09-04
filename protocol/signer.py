@@ -26,28 +26,31 @@ mechanism that forces s_a > 0.
 
 WHAT ALICE HOLDS
 ----------------
-For each element i of L, a Pauli eigenstate: `pauli_map[i]` names the Pauli
-(Z or X) and `private_bits[i]` the eigenvalue bit. Together they are one of
-the four BB84 states -- see bb84.py for the encoding and its one wrinkle
-against the frozen contract's comments.
+P1 is a ONE-TIME signature: for an m-bit message, Alice needs an independent
+L-element sequence for EACH (message bit position, bit value) pair -- 2*m
+sequences, 2*m*L elements total. `keygen(..., message_length=m)` generates
+all of them up front; `KeyPair.pauli_map` / `.private_bits` are the flat
+concatenation, laid out sequence-by-sequence:
 
-Signing reveals that classical description. Security rests on a forger being
-unable to reproduce it from the quantum states alone.
+    sequence(i, v) occupies elements [ (2*i+v)*L : (2*i+v)*L + L ]
+    for message bit position i in 0..m-1, claimed bit value v in {0, 1}
 
-KNOWN DEVIATION, AND IT IS DELIBERATE
--------------------------------------
-P1 is a ONE-TIME signature: Alice needs an independent L-element sequence for
-each (message bit position, bit value) pair, so signing an m-bit message
-consumes 2*m sequences. `contracts.KeyPair` holds exactly one sequence, so
-one KeyPair here signs one message, and the message is bound to the
-signature classically rather than by which key sequence is revealed.
+`n_copies` keeps its original meaning -- L, copies per sequence -- and
+`message_length` (recovered as `len(pauli_map) // (2 * n_copies)`, see
+`_validated_element_count`) is the new second dimension. This is additive:
+`contracts.KeyPair`'s fields are unchanged, only the length relationship
+between `pauli_map`/`private_bits` and `n_copies` does, so no frozen-type
+edit and no Decision Log item for the schema itself.
 
-Consequence, stated plainly: **key reuse across messages is not prevented by
-this implementation**, and per-message-bit key material is the change that
-would fix it. It needs a `contracts.KeyPair` able to hold 2*m*L elements,
-which is a Decision Log item. Until then, one key, one message. This is
-written up in protocol/README.md and belongs in D1 as a stated limitation --
-it is not a hole to be quietly left out of the deck.
+THIS IS THE MESSAGE-BINDING MECHANISM, not decoration. `sign` reveals
+`declared_ops`/eigenvalue data for ONLY the m sequences matching the actual
+message bit values -- `sequence(i, message[i])` -- never the other m
+"the bit was flipped" sequences. A party who tries to re-verify the same
+transcript against a DIFFERENT message forces `verify` to compare the
+REVEALED classical data against the OTHER, never-revealed sequence at each
+position: two independently-drawn random sequences, so the same ~1/4
+mismatch rate that catches a blind forger catches a message swap. See
+`tests/test_signature.py::TestMessageBinding`.
 """
 
 from __future__ import annotations
@@ -69,10 +72,12 @@ def keygen(
     signer_id: str,
     n_copies: int | None = None,
     *,
+    message_length: int = 1,
     core: object | None = None,
     config: QDSConfig | None = None,
 ) -> KeyPair:
-    """Generate Alice's private key: L Pauli eigenstates. (Ks, Kv) <- KeyGen().
+    """Generate Alice's private key: 2*message_length independent L-element
+    sequences, one pair per message bit position. (Ks, Kv) <- KeyGen().
 
     Purely classical: Alice is choosing which states she will later prepare,
     and that choice is a coin flip per element. No quantum operation happens
@@ -80,21 +85,24 @@ def keygen(
     interface symmetry and validation) but not called.
 
     Independence is the point, not an implementation detail. M4's Hoeffding
-    bound assumes the L outcomes are independent, and the justification is
-    right here: each element's basis and bit are drawn independently, so the
-    recipient's L measurement outcomes are independent too. Correlating them
-    -- deriving element i+1 from element i, say -- would invalidate the
-    bound while leaving every test passing.
+    bound assumes the outcomes are independent, and the justification is
+    right here: every element's basis and bit -- across all 2*message_length
+    sequences -- are drawn independently from one continuous stream, so the
+    recipient's measurement outcomes are independent too. Correlating them
+    -- deriving element i+1 from element i, or one sequence from its sibling
+    -- would invalidate the bound while leaving every test passing.
 
     Args:
         signer_id: identity the key is issued to.
-        n_copies: L. `None` takes it from `config`.
+        n_copies: L, copies per sequence. `None` takes it from `config`.
+        message_length: m, the number of message bits this key can sign.
+            Must match `len(message)` at `sign` time. Defaults to 1.
         core: quantum backend. Validated, unused; see above.
         config: protocol parameters. Defaults to `QDSConfig()`.
 
     Raises:
         QuantumCoreError: if `core` does not satisfy the interface.
-        ValueError: on an empty `signer_id` or n_copies < 1.
+        ValueError: on an empty `signer_id`, n_copies < 1, or message_length < 1.
     """
     _core, config = resolve_dependencies(core, config)
     if not signer_id:
@@ -102,10 +110,13 @@ def keygen(
     n_copies = config.n_copies if n_copies is None else n_copies
     if n_copies < 1:
         raise ValueError(f"n_copies (L) must be at least 1, got {n_copies}")
+    if message_length < 1:
+        raise ValueError(f"message_length (m) must be at least 1, got {message_length}")
 
+    n_elements = 2 * message_length * n_copies
     rng = derive_rng(config.seed, KEY_MATERIAL_STREAM)
-    pauli_map = tuple(pauli_of(rng.choice(config.bases)) for _ in range(n_copies))
-    private_bits = tuple(rng.getrandbits(1) for _ in range(n_copies))
+    pauli_map = tuple(pauli_of(rng.choice(config.bases)) for _ in range(n_elements))
+    private_bits = tuple(rng.getrandbits(1) for _ in range(n_elements))
 
     return KeyPair(
         key_id=f"key-{uuid.uuid4().hex[:8]}",
@@ -123,25 +134,32 @@ def sign(
     core: object | None = None,
     config: QDSConfig | None = None,
 ) -> Signature:
-    """Sign `message`: distribute the elements and declare their description.
+    """Sign `message`: reveal the message-matching sequences and distribute them.
 
-    Two things travel to the recipient:
+    For each message bit position i, Alice reveals classical data for
+    EXACTLY ONE of her two pre-distributed sequences: `sequence(i,
+    message[i])`. The sibling sequence `sequence(i, 1 - message[i])` is
+    never touched by this call. That selective revelation is what binds the
+    signature to `message` -- see the module docstring and
+    `tests/test_signature.py::TestMessageBinding`.
 
-      * `declared_ops` -- the Pauli of each element, which together with the
-        key's `private_bits` is the classical description P1 calls PrivKey.
-        This is what a forger has to reproduce and cannot.
+    Two things travel to the recipient, both length `message_length * L`:
+
+      * `declared_ops` -- the Pauli of each revealed element, which together
+        with the key's `private_bits` for those same elements is the
+        classical description P1 calls PrivKey. This is what a forger has
+        to reproduce and cannot -- and, for a message-swap attempt, what an
+        attacker would have to reproduce for the SIBLING sequence, which was
+        never revealed either.
       * `bell_outcomes` -- Alice's Bell-measurement results from teleporting
-        the elements, which the recipient needs to apply the right Pauli
-        correction.
-
-    Both are per ELEMENT, so both have length L -- not `len(message)`, which
-    is what the earlier scaffold returned. M3's adversaries size their
-    mutations off `len(sig.message)` and so will only touch the first few
-    elements of a real signature; that is an M3 follow-up, not a bug here.
+        the revealed elements, which the recipient needs to apply the right
+        Pauli correction.
 
     Raises:
         QuantumCoreError: if `core` does not satisfy the interface.
-        ValueError: on an empty message, a non-bit element, or a malformed key.
+        ValueError: on an empty message, a non-bit element, a message whose
+            length does not match the key's `message_length`, or a
+            malformed key.
     """
     core, config = resolve_dependencies(core, config)
     # Validated here and not in contracts.py: the dataclass is frozen and
@@ -152,16 +170,27 @@ def sign(
     bad = [(i, b) for i, b in enumerate(message) if b not in (0, 1)]
     if bad:
         raise ValueError(f"message must be bits (0 or 1); offending (index, value): {bad}")
-    n_elements = _validated_element_count(key)
+    n_copies, message_length = _validated_element_count(key)
+    if len(message) != message_length:
+        raise ValueError(
+            f"message has {len(message)} bits but key was generated for "
+            f"message_length={message_length}"
+        )
 
-    # Teleport the L elements to the recipient and keep Alice's Bell
+    declared_ops: list = []
+    for i, bit in enumerate(message):
+        seq = 2 * i + bit
+        declared_ops.extend(key.pauli_map[seq * n_copies : (seq + 1) * n_copies])
+    n_revealed = len(declared_ops)
+
+    # Teleport the revealed elements to the recipient and keep Alice's Bell
     # outcomes. The recipient's own measurement happens in verify(); see the
     # note there on why the two halves are not one shot.
-    resource = core.bell_pairs(n_elements, noise_level=config.noise_level)
+    resource = core.bell_pairs(n_revealed, noise_level=config.noise_level)
     bell_outcomes = tuple(core.teleport(resource, noise_level=config.noise_level))
-    if len(bell_outcomes) != n_elements:
+    if len(bell_outcomes) != n_revealed:
         raise ValueError(
-            f"core returned {len(bell_outcomes)} Bell outcomes for {n_elements} elements"
+            f"core returned {len(bell_outcomes)} Bell outcomes for {n_revealed} elements"
         )
 
     return Signature(
@@ -169,7 +198,7 @@ def sign(
         key_id=key.key_id,
         signer_id=key.signer_id,
         message=message,
-        declared_ops=key.pauli_map,
+        declared_ops=tuple(declared_ops),
         bell_outcomes=bell_outcomes,
         # Unique per call. A constant nonce makes every signature after the
         # first a replay once M4 checks it; a constant sig_id collides every
@@ -182,8 +211,8 @@ def sign(
     )
 
 
-def _validated_element_count(key: KeyPair) -> int:
-    """Length of the key's element sequences, or raise.
+def _validated_element_count(key: KeyPair) -> tuple[int, int]:
+    """(n_copies, message_length) for the key's element sequences, or raise.
 
     The key is ours, not the adversary's -- it never crosses the wire -- so
     a malformed one is a caller bug and raising is right. Contrast
@@ -205,9 +234,15 @@ def _validated_element_count(key: KeyPair) -> int:
     bad = [(i, b) for i, b in enumerate(key.private_bits) if b not in (0, 1)]
     if bad:
         raise ValueError(f"malformed key: private_bits must be bits; offending: {bad}")
-    if key.n_copies != len(key.pauli_map):
+    if key.n_copies < 1:
+        raise ValueError(f"malformed key: n_copies must be at least 1, got {key.n_copies}")
+    total = len(key.pauli_map)
+    # Total elements must be 2*m*L for some integer m -- two sequences
+    # (bit=0, bit=1) per message position, L elements each.
+    if total % (2 * key.n_copies) != 0:
         raise ValueError(
-            f"malformed key: n_copies is {key.n_copies} but there are "
-            f"{len(key.pauli_map)} elements"
+            f"malformed key: {total} elements is not a multiple of "
+            f"2 * n_copies ({2 * key.n_copies}); key was not built by keygen()"
         )
-    return len(key.pauli_map)
+    message_length = total // (2 * key.n_copies)
+    return key.n_copies, message_length
