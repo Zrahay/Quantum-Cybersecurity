@@ -1,18 +1,35 @@
 """channel_tamper adversary. Track M3 (Nikita). Deliverable D4.
 
-Eve intercepts a signature in transit, disturbs the quantum information,
-and re-signs with a fresh nonce.
+Eve intercepts a signature in transit, disturbs the quantum channel, and
+retransmits it.
 
-At the ``Signature`` level this is modelled as randomly flipping bits in
-``bell_outcomes`` — a simplification of the real intercept-resend physics
-(noise acts on Bob's qubit, not Alice's bell_outcomes), but structurally
-correct: each bit flip is an independent disturbance that raises the
-mismatch rate downstream.  The real channel-tampering effect will become
-wirable once M2's ``verify()`` measures Bob's qubit.
+TWO SEPARATE THINGS THIS ATTACK REPORTS, kept deliberately apart:
 
-``strength`` controls the fraction of outcome pairs Eve flips
-(0.0 = no tampering, 1.0 = every pair flipped).  Intermediate values
-produce graded detection curves.
+1. ``attack(sig)`` flips bits in ``bell_outcomes`` — a classical,
+   benchmark-visible marker that something happened to the transcript in
+   transit; ``attacks.utils.run_batch`` reports it via ``outcomes_changed``
+   / ``outcomes_diff_count``. ON ITS OWN THIS PRODUCES NO DETECTABLE SIGNAL
+   THROUGH ``verify()``: M2's real ``verify()`` re-derives the recipient's
+   measurement from scratch against the KEY material on every call and
+   never reads ``sig.bell_outcomes`` at all (see protocol/verifier.py), so
+   mutating it here is causally disconnected from anything ``verify()``
+   reports. Confirmed empirically in review before this fix landed — see
+   the Decision Log.
+2. ``noise_level_override()`` reports the physically real mechanism: a
+   depolarising disturbance on the quantum channel, which is exactly
+   ``verify()``'s ``noise_level`` parameter and independently confirmed
+   monotonic in the resulting mismatch rate (0% → 0.0, 10% → ~0.04,
+   30% → ~0.14, 50% → ~0.25 on the ideal-channel baseline). A caller who
+   wants this attack to actually be caught must read it and pass it on:
+   ``verify(sig, key, noise_level=adversary.noise_level_override())``.
+   ``attack(sig)``'s return value is not enough by itself — the channel is
+   not a property of the Signature object (see the note at the bottom of
+   contracts.py).
+
+``strength`` drives both: the bell_outcomes flip probability (1) and the
+noise_level passed to verify() (2), so one dial raises the transcript-diff
+signal and the real detection signal together
+(0.0 = no tampering, 1.0 = maximum of both).
 
 No AI/ML is used.
 """
@@ -20,21 +37,15 @@ No AI/ML is used.
 from __future__ import annotations
 
 import random
-import uuid
 
 from attacks.base import BaseAdversary
 from contracts import Signature, ThreatType
 
 
 class ChannelTamperAdversary(BaseAdversary):
-    """Flip bits in ``bell_outcomes`` to simulate intercept-resend.
-
-    Each pair ``(clbit0, clbit1)`` is independently targeted with
-    probability ``strength``.  A targeted pair has one of its two bits
-    flipped uniformly at random — this is the minimal disturbance that
-    produces a detectable mismatch while keeping the attack model
-    honest (Eve cannot control which bit she disturbs; the quantum
-    measurement collapses randomly).
+    """Flip bits in ``bell_outcomes`` (benchmark marker) and report a
+    ``noise_level`` (the real, verify()-visible mechanism) — see the
+    module docstring for why both exist and only one is evidence.
     """
 
     threat = ThreatType.CHANNEL_TAMPER
@@ -59,3 +70,10 @@ class ChannelTamperAdversary(BaseAdversary):
             nonce=uuid.uuid4().hex,
             timestamp=sig.timestamp,
         )
+
+    def noise_level_override(self) -> float:
+        """The channel noise_level a caller should verify() this signature
+        at. `strength` doubles as both the bell_outcomes flip probability
+        and the depolarising channel parameter -- see the module docstring.
+        """
+        return self.strength
