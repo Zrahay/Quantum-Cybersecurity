@@ -21,6 +21,12 @@ from attacks.replay import ReplayAdversary
 from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
+from attacks.pns import PNSAdversary
+from attacks.collective import CollectiveAttackAdversary
+from attacks.faked_state import FakedStateAdversary
+from attacks.time_shift import TimeShiftAdversary
+from attacks.trojan_horse import TrojanHorseAdversary
+from attacks.mitm_classical import MitmClassicalAdversary
 from detection.detector import evaluate
 from detection.statistics import mismatch_rate
 from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
@@ -89,6 +95,12 @@ st.markdown("""
     .attack-forgery button { background: #dc3545 !important; border-color: #dc3545 !important; color: white !important; }
     .attack-channel_tamper button { background: #20c997 !important; border-color: #20c997 !important; color: white !important; }
     .attack-impersonation button { background: #fd7e14 !important; border-color: #fd7e14 !important; color: white !important; }
+    .attack-pns button { background: #0d6efd !important; border-color: #0d6efd !important; color: white !important; }
+    .attack-collective button { background: #6f42c1 !important; border-color: #6f42c1 !important; color: white !important; }
+    .attack-faked_state button { background: #6c757d !important; border-color: #6c757d !important; color: white !important; }
+    .attack-time_shift button { background: #ffc107 !important; border-color: #ffc107 !important; color: black !important; }
+    .attack-trojan_horse button { background: #8B4513 !important; border-color: #8B4513 !important; color: white !important; }
+    .attack-mitm_classical button { background: #fd7e14 !important; border-color: #fd7e14 !important; color: white !important; }
 
     /* Primary action */
     .sign-button button { background: #28a745 !important; border-color: #28a745 !important; font-size: 1.1rem !important; padding: 0.75rem 1.5rem !important; }
@@ -345,7 +357,7 @@ with st.sidebar:
     n_copies = st.number_input(
         "Copies (L)",
         min_value=1,
-        max_value=256,
+        max_value=128,
         value=st.session_state.config.n_copies,
         step=1,
         help="Number of signature copies per verifier, per message bit. Higher L = stronger security.",
@@ -554,15 +566,21 @@ def main() -> None:
         "Forgery": (ForgeryAdversary(strength=1.0), "🔴 Forgery", "attack-forgery", "Random Pauli ops, real teleportation outcomes"),
         "Channel Tamper": (ChannelTamperAdversary(strength=1.0), "🟢 Channel Tamper", "attack-channel_tamper", "Flips bell outcome bits in transit"),
         "Impersonation": (ImpersonationAdversary(claimed_identity=st.session_state.signer_id, strength=1.0), "🟠 Impersonation", "attack-impersonation", "Fabricates key_id + random ops/outcomes"),
+        "PNS": (PNSAdversary(strength=1.0), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
+        "Collective": (CollectiveAttackAdversary(strength=0.5), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
+        "Faked-State": (FakedStateAdversary(strength=1.0), "⚪ Faked-State", "attack-faked_state", "Forces detector outcome, zero disturbance"),
+        "Time-Shift": (TimeShiftAdversary(strength=1.0), "🟡 Time-Shift", "attack-time_shift", "Exploits detector timing mismatch via timestamp"),
+        "Trojan-Horse": (TrojanHorseAdversary(strength=1.0), "🟤 Trojan-Horse", "attack-trojan_horse", "Learns ops via injected light, zero disturbance (hardware defence)"),
+        "MitM Classical": (MitmClassicalAdversary(strength=1.0), "🔶 MitM Classical", "attack-mitm_classical", "Tampers real announced ops in transit"),
     }
 
     # Create attack buttons and capture clicks immediately
-    atk_cols = st.columns(4, gap="medium")
+    atk_cols = st.columns(5, gap="medium")
     attack_clicked = None
     attack_adv = None
 
     for i, (label, (adv, display_label, css_class, tooltip)) in enumerate(attack_adversaries.items()):
-        with atk_cols[i]:
+        with atk_cols[i % 5]:
             st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
             clicked = st.button(
                 display_label,
@@ -722,6 +740,87 @@ def main() -> None:
         st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
     else:
         st.info("📭 No events yet. Sign a message or launch an attack to populate the log.")
+
+    # --- Evidence Panel: Plots ---
+    st.markdown("### 📈 Evidence")
+
+    import math
+    import numpy as np
+
+    tab1, tab2, tab3 = st.tabs(["Mismatch History", "Forgery Probability Curve", "Noise Sweep"])
+
+    with tab1:
+        if st.session_state.event_log:
+            import pandas as pd
+            log_df = pd.DataFrame(st.session_state.event_log)
+            log_df["mismatch_pct"] = log_df["mismatch"].str.rstrip("%").astype(float)
+            log_df["idx"] = range(len(log_df) - 1, -1, -1)
+
+            st.line_chart(
+                log_df.set_index("idx")["mismatch_pct"],
+                use_container_width=True,
+                height=300,
+                color="#dc3545",
+            )
+            st.caption("Mismatch rate per event (newest at top)")
+        else:
+            st.info("Sign a message or launch an attack to see the mismatch history.")
+
+    with tab2:
+        L_range = np.arange(8, 512, 8)
+        p_f = 1e-6
+        noise_floor = 0.0
+
+        def hoeffding_s_a(n, nf, pf):
+            if n <= 0:
+                return 1.0
+            margin = math.sqrt(-math.log(pf) / (2.0 * n))
+            return min(nf + margin, 1.0)
+
+        s_a_values = [hoeffding_s_a(int(l / 2), noise_floor, p_f) for l in L_range]
+
+        curve_df = pd.DataFrame({
+            "L": L_range,
+            "Acceptance Threshold (s_a)": s_a_values,
+        })
+
+        st.line_chart(
+            curve_df.set_index("L"),
+            use_container_width=True,
+            height=300,
+            color=["#28a745"],
+        )
+        st.caption("Hoeffding-derived acceptance threshold vs L (message_length=2). Forgery probability ≤ 10⁻⁶")
+
+        # Mark current L
+        current_L = st.session_state.config.n_copies
+        current_s_a = hoeffding_s_a(current_L // 2, noise_floor, p_f)
+        st.metric("Current L", current_L, help="Your active signature copies")
+        st.metric("Current s_a", f"{current_s_a:.3f}", help="Acceptance threshold at this L")
+
+    with tab3:
+        noise_levels = np.arange(0.0, 1.05, 0.05)
+        L = 64
+        msg_len = 2
+        expected_mismatch = []
+
+        for nl in noise_levels:
+            # Approximate: mismatch ≈ noise_level * (fraction of conclusive elements)
+            # On ideal channel, mismatch ≈ noise_level * 0.5 (half elements conclusive)
+            expected_mismatch.append(nl * 0.5 * 100)
+
+        sweep_df = pd.DataFrame({
+            "Noise Level": [f"{nl:.0%}" for nl in noise_levels],
+            "Expected Mismatch (%)": expected_mismatch,
+        })
+
+        st.line_chart(
+            sweep_df.set_index("Noise Level"),
+            use_container_width=True,
+            height=300,
+            color=["#ffc107"],
+        )
+        st.caption("Theoretical mismatch rate vs channel noise level (L=64, message_length=2)")
 
     # --- Footer ---
     st.markdown("---")
