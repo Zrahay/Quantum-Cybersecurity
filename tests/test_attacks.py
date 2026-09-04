@@ -113,14 +113,18 @@ class TestReplay(unittest.TestCase):
 class TestForgery(unittest.TestCase):
 
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI. 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
         self.assertNotEqual(r1.declared_ops, r2.declared_ops)
 
     def test_different_outcomes_each_time(self):
-        sig = _make_sig()
+        # Same collision-probability reasoning as test_different_ops_each_time.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
@@ -180,6 +184,33 @@ class TestForgery(unittest.TestCase):
         # Random Pauli ops against random ops: ~25% per-bit match chance
         self.assertLess(avg_ops_match, 0.5)
 
+    def test_full_forgery_touches_the_real_element_count_not_just_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) would leave
+        every element past the first few untouched even at strength=1.0.
+        """
+        n_elements = 300  # far more than any plausible message length
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),  # 3 bits -- much shorter than n_elements
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        adv = ForgeryAdversary(strength=1.0)
+        result = adv.attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
+        ops_match = sum(
+            1 for o, f in zip(realistic_sig.declared_ops, result.declared_ops)
+            if o == f
+        )
+        # Full-strength forgery on 300 random-Pauli elements: ~25% match by
+        # chance. The old bug would have left ~297 of 300 untouched (only
+        # indices 0..2 were ever forge-eligible), giving ops_match near 300.
+        self.assertLess(ops_match, 150)
+
 
 # ── Channel Tamper ───────────────────────────────────────────────────────
 
@@ -225,6 +256,54 @@ class TestChannelTamper(unittest.TestCase):
         result = adv.attack(sig)
         self.assertEqual(result.message, sig.message)
 
+    def test_noise_level_override_reports_strength(self):
+        """The real, verify()-visible detection mechanism -- see the module
+        docstring on why the bell_outcomes flip above is not enough on its
+        own to be caught by M2's verify()."""
+        for strength in (0.0, 0.3, 1.0):
+            adv = ChannelTamperAdversary(strength=strength)
+            self.assertEqual(adv.noise_level_override(), strength)
+
+    def test_other_adversaries_do_not_override_noise_level(self):
+        """noise_level_override() defaults to None: only channel tampering
+        is a property of the physical channel rather than the Signature."""
+        for adv in (ReplayAdversary(), ForgeryAdversary(), ImpersonationAdversary()):
+            with self.subTest(adversary=adv.name):
+                self.assertIsNone(adv.noise_level_override())
+
+    def test_detectable_through_verify_only_when_noise_level_is_threaded(self):
+        """End-to-end: attack(sig) alone is invisible to M2's real verify();
+        threading noise_level_override() through is what makes it visible.
+
+        This is the regression guard for the finding that motivated
+        noise_level_override() in the first place -- bell_outcomes tampering
+        alone produces zero mismatch-rate change because verify() never
+        reads that field.
+        """
+        from detection.statistics import mismatch_rate
+        from protocol import MockQuantumCore, QDSConfig, keygen, sign, verify
+
+        L, m = 300, 2
+        cfg = QDSConfig(n_copies=L, seed=3)
+        core = MockQuantumCore(seed=3)
+        key = keygen("alice", L, message_length=m, core=core, config=cfg)
+        sig = sign((1, 0), key, core=core, config=cfg)
+
+        adv = ChannelTamperAdversary(strength=0.6)
+        tampered = adv.attack(sig)
+
+        blind_records = verify(tampered, key, core=core, config=cfg)
+        self.assertEqual(mismatch_rate(blind_records), 0.0,
+                          "bell_outcomes tampering alone should NOT be visible")
+
+        threaded_records = verify(
+            tampered, key, core=core, config=cfg,
+            noise_level=adv.noise_level_override(),
+        )
+        self.assertGreater(mismatch_rate(threaded_records), 0.05,
+                            "threading noise_level_override() should make the "
+                            "attack visible")
+
 
 # ── Impersonation ────────────────────────────────────────────────────────
 
@@ -255,8 +334,28 @@ class TestImpersonation(unittest.TestCase):
         result = adv.attack(sig)
         self.assertEqual(len(result.declared_ops), 6)
 
+    def test_ops_length_matches_the_real_element_count_not_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) undersized
+        both declared_ops and bell_outcomes to the message length."""
+        n_elements = 300
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        result = ImpersonationAdversary().attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
+
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI (observed). 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ImpersonationAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
