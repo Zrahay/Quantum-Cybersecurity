@@ -1,14 +1,59 @@
 """Threat detection engine. Track M4 (Hemang). Deliverable D2.
 
-No machine learning anywhere in this path.  Pure statistics: mismatch rate,
-Hoeffding bound, chi-square goodness-of-fit.
+No machine learning anywhere in this path. Every decision below is a
+threshold derived from a closed-form bound (Hoeffding) or a hypothesis
+test (chi-square), never a learned model and never a hand-tuned magic
+number.
+
+THRESHOLD DERIVATION -- READ THIS BEFORE TOUCHING s_a / s_v
+-------------------------------------------------------------
+s_a and s_v are derived from an INDEPENDENT noise floor, never from the
+mismatch rate of the very signature being classified. An earlier attempt
+at this file (commit a5c2220, reverted in ef4ca32/0d870ed) set
+`noise_floor = mismatch_rate(records)` for the signature under test and
+then compared that signature's own rate against a threshold built from
+itself. Since s_a = noise_floor + margin is *always* strictly greater
+than the noise_floor it was built from, every signature satisfied
+`r < s_a` and the detector accepted everything except nonce replay --
+a fatal circularity dressed up as a real check.
+
+The correct source for the noise floor is a CHANNEL CALIBRATION: the
+mismatch rate measured across many known-legitimate signatures on the
+actual configured channel (see `protocol/config.py`'s
+`QDSConfig.noise_level` docstring -- "the mismatch rate it induces is
+some monotonic function of this number that must be MEASURED, not
+assumed. That measurement is the noise floor M4 derives s_a from.").
+That calibration is independent of any one signature's own statistics,
+which is what makes the resulting threshold a real test rather than a
+tautology.
+
+`evaluate` therefore takes `noise_floor` as a keyword argument rather
+than computing it internally. The default, 0.0, is not an arbitrary
+placeholder -- it is `QDSConfig.noise_level`'s own default, the ideal
+(noiseless) channel. A deployment running at a non-zero configured noise
+level supplies its own calibrated floor (a `bench/` script, or any
+caller that has run many legitimate signatures through `verify()` at the
+real `noise_level` and averaged their `mismatch_rate`). Passing a
+per-signature-derived value here would reintroduce exactly the bug
+above; don't.
+
+`target_forgery_prob` is the p_f the thresholds are sized against, and
+defaults to `QDSConfig.target_forgery_prob`'s own default (1e-6) for the
+same reason -- it is a property of the protocol run, not something this
+function should invent.
+
+Both kwargs keep `evaluate` pure: same four arguments (three positional,
+matching the frozen CLAUDE.md convention, plus these two defaulted
+keywords) always produce the same output. Nothing here is read from
+module state or wall-clock time except the `timestamp` field, which
+records when the verdict was computed -- exactly as any event log entry
+would.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections import Counter
 
 from contracts import (
     DetectionResult,
@@ -17,148 +62,181 @@ from contracts import (
     ThreatType,
     Verdict,
 )
+from detection.statistics import chi2_uniformity, hoeffding_bound, mismatch_rate
 
 
-def _mismatch_rate(records: list[MeasurementRecord]) -> float:
-    """Fraction of conclusive records where expected != observed."""
-    if not records:
-        return 0.0
-    return sum(r.mismatch for r in records) / len(records)
+def _margin_for(p: float, n: int) -> float:
+    """Invert the Hoeffding bound: the margin m solving exp(-2 n m^2) = p.
 
-
-def _hoeffding_bound(n: int, mismatch_rate: float, noise_floor: float = 0.0) -> float:
-    """P(observed_rate > noise_floor + margin) <= exp(-2 * n * margin^2).
-
-    Returns the upper-bound forgery probability at this L given the
-    observed mismatch rate and estimated noise floor.
+    m = sqrt(-ln(p) / (2n)). `p` must be in (0, 1]; `n` must be positive
+    (both guaranteed by the callers below, which only reach here once
+    `records` is known non-empty).
     """
-    if n <= 0:
-        return 1.0
-    margin = mismatch_rate - noise_floor
-    if margin <= 0:
-        return 1.0  # observed <= noise floor, no evidence of attack
-    return math.exp(-2.0 * n * margin * margin)
+    return math.sqrt(-math.log(p) / (2.0 * n))
 
 
-def _chi2_test(records: list[MeasurementRecord]) -> tuple[float, float]:
-    """Chi-square goodness-of-fit on per-basis mismatch counts.
+def _validate_independent_inputs(noise_floor: float, target_forgery_prob: float) -> None:
+    """Guard the two caller-supplied thresholds' own preconditions.
 
-    Tests whether mismatches are uniformly distributed across bases.
-    Returns (chi2_statistic, p_value).
+    `noise_floor` is a mismatch rate -- must be a probability. Negative or
+    >1 doesn't crash downstream (it just produces a nonsensical threshold
+    or a discarded chi-square cell), which is worse than failing loudly:
+    a caller-side bug would otherwise show up as a wrong VERDICT rather
+    than an error pointing at its actual cause.
+
+    `target_forgery_prob` feeds `math.log` in `_margin_for` -- <= 0 raises
+    a bare `math domain error` with no indication of which argument was
+    wrong; > 1 is not a probability at all. Both are checked here instead,
+    matching the style of `QDSConfig.__post_init__`'s own validation.
     """
-    if len(records) < 2:
-        return 0.0, 1.0
-
-    basis_counts: Counter = Counter()
-    basis_mismatches: Counter = Counter()
-    for r in records:
-        basis_counts[r.basis] += 1
-        if r.mismatch:
-            basis_mismatches[r.basis] += 1
-
-    n_bases = len(basis_counts)
-    if n_bases < 2:
-        return 0.0, 1.0
-
-    total_mismatches = sum(basis_mismatches.values())
-    if total_mismatches == 0:
-        return 0.0, 1.0
-
-    # Expected mismatches per basis under uniform distribution
-    expected_per_basis = total_mismatches / n_bases
-
-    chi2 = 0.0
-    for basis in basis_counts:
-        observed = basis_mismatches.get(basis, 0)
-        chi2 += (observed - expected_per_basis) ** 2 / expected_per_basis
-
-    # p-value approximation via survival function for chi2 with (n_bases - 1) df
-    df = n_bases - 1
-    p_value = _chi2_sf(chi2, df)
-
-    return chi2, p_value
+    if not 0.0 <= noise_floor <= 1.0:
+        raise ValueError(f"noise_floor must be a probability in 0.0-1.0, got {noise_floor}")
+    if not 0.0 < target_forgery_prob <= 1.0:
+        raise ValueError(
+            f"target_forgery_prob (p_f) must be in (0.0, 1.0], got {target_forgery_prob}"
+        )
 
 
-def _chi2_sf(x: float, df: int) -> float:
-    """Chi-square survival function approximation (1 - CDF).
+def _derive_thresholds(noise_floor: float, n: int, target_forgery_prob: float) -> tuple[float, float]:
+    """Derive (s_a, s_v) from an INDEPENDENT noise floor -- see module docstring.
 
-    Uses the incomplete gamma function approximation.
-    Good enough for the demo -- we don't need scipy here.
+    s_a = noise_floor + margin(p_f)      -- exp(-2 n margin^2) = p_f
+    s_v = noise_floor + margin(p_f / 2)  -- a strictly larger margin, since
+                                             a smaller target probability
+                                             needs more room, giving
+                                             s_v > s_a as `Verdict` requires.
+
+    Both are capped at 1.0 (a mismatch rate cannot exceed 1.0, and a huge
+    n or generous p_f can otherwise push the additive margin past it).
     """
-    if x <= 0 or df <= 0:
-        return 1.0
-    # For small df, use a simple table lookup / approximation
-    # For df=1: P(X > x) = 2 * (1 - Phi(sqrt(x)))
-    # For df=2: P(X > x) = exp(-x/2)
-    if df == 1:
-        return 2.0 * _normal_sf(math.sqrt(x))
-    if df == 2:
-        return math.exp(-x / 2.0)
-    # General approximation using Wilson-Hilferty transformation
-    if df >= 3:
-        z = ((x / df) ** (1.0 / 3.0) - (1.0 - 2.0 / (9.0 * df))) / math.sqrt(2.0 / (9.0 * df))
-        return _normal_sf(z)
-    return 1.0
+    margin_a = _margin_for(target_forgery_prob, n)
+    margin_v = _margin_for(target_forgery_prob / 2.0, n)
+    s_a = min(noise_floor + margin_a, 1.0)
+    s_v = min(noise_floor + margin_v, 1.0)
+    return s_a, s_v
 
 
-def _normal_sf(z: float) -> float:
-    """Standard normal survival function (1 - Phi(z)) approximation."""
-    if z < -6:
-        return 1.0
-    if z > 6:
-        return 0.0
-    # Abramowitz & Stegun approximation
-    t = 1.0 / (1.0 + 0.2316419 * abs(z))
-    d = 0.3989422804014327  # 1/sqrt(2*pi)
-    p = d * math.exp(-z * z / 2.0) * (
-        t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))))
+def _reject_reason_and_threat(r: float, n: int, chi2_p: float) -> tuple[ThreatType, str]:
+    """Classify a REJECTED (non-replay) signature from its statistics alone.
+
+    This is deliberately the one coarse spot in the classifier, and the
+    reasoning for collapsing three `ThreatType` values into one is stated
+    here rather than hidden behind an invented heuristic.
+
+    `evaluate`'s signature is (records, sig, seen_nonces) -- no key
+    registry is passed in, so there is no way to tell "a fabricated
+    key_id" (IMPERSONATION) apart from "a real key_id with randomised
+    Pauli corrections" (FORGERY) from statistics alone: both adversaries
+    replace `declared_ops` with values uncorrelated to the key (see
+    attacks/forgery.py, attacks/impersonation.py), and `evaluate` cannot
+    see which key_id is real.
+
+    A three-way split against CHANNEL_TAMPER was attempted and dropped.
+    The obvious-looking test -- "mismatch rate near 0.5 (coin flip) means
+    fabricated ops; mismatch rate elevated but clearly below 0.5 means an
+    honest signature over a noisy channel" -- was checked empirically
+    against this codebase's own adversaries and does NOT hold: on the
+    analytic reference core (`protocol.MockQuantumCore`), a full-strength
+    FORGERY/IMPERSONATION attack produces mismatch rates around 0.20-0.28,
+    not 0.5, while `ChannelTamperAdversary`'s `noise_level` maps to mismatch
+    rate roughly *linearly* through `strength` (0.1 -> ~0.10, 0.3 ->
+    ~0.32, 0.5 -> ~0.52, 1.0 -> ~1.0) because the mock core models noise
+    as an i.i.d. per-bit flip, not the bounded depolarising channel the
+    real backend uses. The two distributions overlap across most of the
+    strength range either adversary would plausibly use, so a "distance
+    from 0.5" cutoff would silently mislabel whichever attack happened to
+    be dialed to the boundary -- exactly the unprincipled,
+    threshold-shopped classifier the M4 brief warns against. Per that
+    brief: when no principled statistical distinguishing signal exists,
+    collapse rather than invent one.
+
+    So every non-replay REJECT reports as FORGERY. The `reason` string
+    still carries the actual evidence (mismatch rate, sample size, and
+    the chi-square goodness-of-fit result against the independent noise
+    floor) so a judge can see exactly what tripped the threshold, and
+    says explicitly that IMPERSONATION and CHANNEL_TAMPER are folded in.
+    """
+    return (
+        ThreatType.FORGERY,
+        f"Rejected: mismatch rate {r:.3f} over n={n} measurements exceeds "
+        f"the verification threshold s_v (chi-square goodness-of-fit "
+        f"p={chi2_p:.3g} against the independent noise floor). Reported as "
+        "FORGERY; IMPERSONATION and CHANNEL_TAMPER are deliberately "
+        "collapsed into this bucket -- evaluate() has no key registry to "
+        "tell a fabricated key_id from randomised Pauli corrections, and "
+        "empirically the mismatch-rate distributions of a randomised-ops "
+        "attack and an elevated-noise channel overlap too much to split "
+        "with a principled statistical test (see this function's "
+        "docstring)."
     )
-    return p if z >= 0 else 1.0 - p
 
 
 def evaluate(
     records: list[MeasurementRecord],
     sig: Signature,
     seen_nonces: set[str],
+    *,
+    noise_floor: float = 0.0,
+    target_forgery_prob: float = 1e-6,
 ) -> DetectionResult:
     """Classify a signature from its measurement statistics.
 
-    Pure function: replay state is passed in as ``seen_nonces`` rather than
-    held at module level, so the same inputs always give the same output.
+    Pure function: replay state is passed in as `seen_nonces` rather than
+    held at module level, so the same inputs always give the same output
+    (modulo the wall-clock `timestamp` field, which records when this
+    verdict was computed). `noise_floor` and `target_forgery_prob` default
+    to `QDSConfig`'s own defaults (ideal channel, p_f=1e-6) -- see the
+    module docstring for why they are independent inputs rather than
+    derived from `records` here.
 
     CALLER PROTOCOL -- the order is load-bearing, get it wrong and replay
     detection either fires on everything or on nothing:
 
         1. result = evaluate(records, sig, seen_nonces)   # do NOT add first
-        2. seen_nonces.add(sig.nonce)                     # only after
+        2. seen_nonces.add(sig.nonce)                      # only after
 
     Adding before evaluating makes every signature a replay of itself and
-    rejects 100% of legitimate traffic.  Never adding at all disables replay
-    detection silently.  ``evaluate`` never mutates the set.
+    rejects 100% of legitimate traffic. Never adding at all disables replay
+    detection silently. `evaluate` never mutates the set.
 
     Check replay FIRST inside this function -- a replayed signature has
     perfect statistics, so any other ordering lets it through.
     """
-    n = len(records)
+    _validate_independent_inputs(noise_floor, target_forgery_prob)
     now = time.time()
 
-    # --- Replay detection (check FIRST -- replayed sigs have perfect stats) ---
+    # 1. REPLAY -- checked first and unconditionally, regardless of how
+    # clean the statistics look. A replayed signature is a byte-for-byte
+    # resubmission of a once-legitimate transcript, so its mismatch rate
+    # tells you nothing; only the nonce does.
     if sig.nonce in seen_nonces:
+        try:
+            r = mismatch_rate(records)
+            n = len(records)
+        except ValueError:
+            r, n = 0.0, 0
         return DetectionResult(
             sig_id=sig.sig_id,
             verdict=Verdict.REJECT,
             threat=ThreatType.REPLAY,
-            mismatch_rate=0.0,
+            mismatch_rate=r,
             n_measurements=n,
-            forgery_prob_bound=0.0,
+            forgery_prob_bound=1.0,  # not a forgery-probability claim: reused, not forged
             chi2_stat=0.0,
             chi2_p_value=1.0,
-            reason="Replay detected: nonce already seen",
+            reason=f"Replay detected: nonce {sig.nonce!r} already seen "
+            "(no-cloning forces replay defence to the classical "
+            "nonce/timestamp layer, not the quantum statistics).",
             timestamp=now,
         )
 
-    # --- No records → insufficient data, fail closed ---
-    if n == 0:
+    # 2. INSUFFICIENT DATA -- no conclusive elements at all. `verify()`'s
+    # own docstring documents this as a legitimate real case (an all-I
+    # `declared_ops`, or a malformed `message`), not an error. Fails
+    # closed rather than reading "no data" as a perfect mismatch rate of
+    # 0.0, which is exactly the fail-open bug `mismatch_rate` guards
+    # against -- see its docstring.
+    if not records:
         return DetectionResult(
             sig_id=sig.sig_id,
             verdict=Verdict.REJECT,
@@ -168,103 +246,80 @@ def evaluate(
             forgery_prob_bound=1.0,
             chi2_stat=0.0,
             chi2_p_value=1.0,
-            reason="No conclusive measurements — insufficient data to verify",
+            reason="Rejected: no conclusive measurement elements -- "
+            "insufficient data to accept, not evidence of a zero "
+            "mismatch rate.",
             timestamp=now,
         )
 
-    # --- Core statistics ---
-    rate = _mismatch_rate(records)
-    chi2, p_value = _chi2_test(records)
+    r = mismatch_rate(records)
+    n = len(records)
 
-    # --- Hoeffding bound ---
-    # Noise floor: use a conservative estimate.  On an ideal channel with
-    # noise_level=0 the floor is ~0; with noise it rises.  We use 0.0 as the
-    # floor (best case for the signer) so the bound is strongest.  M4 can
-    # refine this with calibration runs later.
-    noise_floor = 0.0
-    bound = _hoeffding_bound(n, rate, noise_floor)
+    # 3. THRESHOLDS -- derived from the INDEPENDENT noise_floor argument,
+    # never from `r` itself. See module docstring.
+    s_a, s_v = _derive_thresholds(noise_floor, n, target_forgery_prob)
 
-    # --- Thresholds ---
-    # s_a: maximum mismatch rate for unconditional acceptance
-    # s_v: mismatch rate above which unconditional rejection
-    # Derived from noise floor + safety margin.  Conservative defaults that
-    # work for the demo: legitimate sigs stay under 10%, attacks land above.
-    s_a = 0.10  # accept threshold
-    s_v = 0.20  # reject threshold
+    # 4. Hoeffding bound on forging this well by chance at this L. By
+    # construction `margin_for(target_forgery_prob, n)` is exactly the
+    # margin s_a was built from, so this ALWAYS evaluates to exactly
+    # target_forgery_prob, for any n or observed rate -- it is the
+    # protocol's DESIGNED security guarantee at this sample size (the
+    # p_f the thresholds were sized against), not a statistic computed
+    # from this particular signature. It will read the same on every
+    # DetectionResult; that is intentional, not a bug -- see the module
+    # docstring on why noise_floor/target_forgery_prob are independent
+    # inputs rather than derived per-signature.
+    forgery_bound = hoeffding_bound(n, _margin_for(target_forgery_prob, n))
 
-    # --- Verdict ---
-    if rate < s_a:
+    # 5. Chi-square goodness-of-fit: are the observed match/mismatch
+    # counts consistent with the independent noise-floor rate? A 2-cell
+    # test -- match vs. mismatch -- against Binomial(n, noise_floor).
+    # Requires an expected count of >= 5 per cell (chi2_uniformity's own
+    # guard); with the ideal-channel default (noise_floor=0.0) the
+    # expected mismatch count is 0, so the test is honestly reported as
+    # not applicable rather than faking a p-value.
+    mismatches = sum(1 for rec in records if rec.mismatch)
+    matches = n - mismatches
+    counts = {"match": matches, "mismatch": mismatches}
+    expected = {"match": n * (1.0 - noise_floor), "mismatch": n * noise_floor}
+    chi2_stat, chi2_p = chi2_uniformity(counts, expected)
+
+    # 6. VERDICT from the independently-derived thresholds.
+    if r < s_a:
         verdict = Verdict.ACCEPT
-    elif rate < s_v:
+    elif r < s_v:
         verdict = Verdict.ACCEPT_NO_TRANSFER
     else:
         verdict = Verdict.REJECT
 
-    # --- Threat classification ---
-    if rate < s_a:
-        # Low mismatch → legitimate or negligible channel noise
+    # 7. THREAT classification. Only meaningful on REJECT -- ACCEPT and
+    # ACCEPT_NO_TRANSFER are both "this signature passed", so ThreatType.NONE.
+    if verdict is Verdict.ACCEPT:
         threat = ThreatType.NONE
-        reason = f"Legitimate signature — mismatch {rate:.1%} within noise floor"
+        reason = (
+            f"Accepted: mismatch rate {r:.3f} over n={n} is below s_a="
+            f"{s_a:.3f} (noise_floor={noise_floor:.3f} + Hoeffding margin "
+            f"for p_f={target_forgery_prob:.1e})."
+        )
+    elif verdict is Verdict.ACCEPT_NO_TRANSFER:
+        threat = ThreatType.NONE
+        reason = (
+            f"Accepted without key transfer: mismatch rate {r:.3f} over "
+            f"n={n} is between s_a={s_a:.3f} and s_v={s_v:.3f} -- within "
+            "the protocol's marginal window, not evidence of an attack."
+        )
     else:
-        # High mismatch → classify by statistical pattern
-        # Forgery: Eve has no key, declares random ops, teleports fixed |0>.
-        #   The ops-outcomes correlation that a legitimate signer relies on is
-        #   absent → ~50% mismatch on conclusive elements.
-        # Impersonation: same as forgery but also fabricates key_id.
-        # Channel tamper: legitimate ops, but physical noise corrupts outcomes.
-        #   The mismatch rate is monotonic in the noise_level parameter.
-        #
-        # Heuristic: very high mismatch (~50%) → forgery or impersonation.
-        # Moderate mismatch → channel tamper.  We use the chi-square pattern
-        # to further separate: forgery/impersonation produce uniform random
-        # mismatches across all bases (chi2 low), while channel tamper can
-        # show basis-dependent patterns if the noise is structured.
-        # Classification by mismatch rate:
-        # - Forgery/Impersonation: Eve has no key, declares random ops.
-        #   Only ~50% of elements are conclusive (same basis), and of
-        #   those the random expected vs observed disagree at ~25%.
-        #   Typical range: 15-30% overall mismatch.
-        # - Channel tamper: physical noise corrupts all elements uniformly.
-        #   At noise_level=1.0 → ~50% mismatch; at 0.5 → ~25%.
-        #   The key signal: channel tamper mismatch is MONOTONIC in
-        #   noise_level and affects ALL bases equally.
-        #
-        # We use the chi-square pattern: forgery produces more uniform
-        # mismatches (random ops → random basis alignment), while channel
-        # tamper can show structured patterns.  But the primary split is
-        # the mismatch rate itself.
-        if rate >= 0.35:
-            # High mismatch → channel tampering at significant noise level
-            threat = ThreatType.CHANNEL_TAMPER
-            reason = (
-                f"Channel tampering detected — mismatch {rate:.1%} indicates "
-                f"significant channel noise. Hoeffding bound: {bound:.2e}"
-            )
-        elif rate >= 0.15:
-            # Moderate mismatch → forgery or impersonation
-            # Without access to the key, we default to forgery.
-            threat = ThreatType.FORGERY
-            reason = (
-                f"Forgery detected — mismatch {rate:.1%} exceeds noise floor. "
-                f"Hoeffding bound: {bound:.2e}"
-            )
-        else:
-            # Between s_a and 0.15 → borderline, lower confidence
-            threat = ThreatType.FORGERY
-            reason = (
-                f"Suspected attack — mismatch {rate:.1%} above noise floor. "
-                f"Hoeffding bound: {bound:.2e}"
-            )
+        threat, reason = _reject_reason_and_threat(r, n, chi2_p)
 
     return DetectionResult(
         sig_id=sig.sig_id,
         verdict=verdict,
         threat=threat,
-        mismatch_rate=rate,
+        mismatch_rate=r,
         n_measurements=n,
-        forgery_prob_bound=bound,
-        chi2_stat=chi2,
-        chi2_p_value=p_value,
+        forgery_prob_bound=forgery_bound,
+        chi2_stat=chi2_stat,
+        chi2_p_value=chi2_p,
         reason=reason,
         timestamp=now,
     )

@@ -22,6 +22,7 @@ from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
 from detection.detector import evaluate
+from detection.statistics import mismatch_rate
 from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
 
 
@@ -231,9 +232,39 @@ def _threat_label(threat: ThreatType) -> str:
     }.get(threat, "❓ Unknown")
 
 
+def _calibrated_noise_floor(config: QDSConfig) -> float:
+    """The mismatch rate a KNOWN-legitimate signature gets at the current
+    channel config -- i.e. the independent `noise_floor` evaluate() needs.
+
+    `config.noise_level` is a depolarising-channel DIAL, not a mismatch
+    rate -- detection/detector.py's module docstring and QDSConfig's own
+    docstring both say this must be MEASURED, not assumed (they are only
+    roughly related: e.g. noise_level 0.3 has empirically measured around
+    a 0.14 mismatch rate, not 0.3). This runs one throwaway
+    keygen/sign/verify at the current config and measures it directly,
+    rather than passing noise_level straight through.
+
+    Cached per (n_copies, noise_level, bases) in session state, since it
+    is expensive (a real quantum-core run) and only changes when the
+    channel config does -- not on every signature.
+    """
+    cache = st.session_state.setdefault("_noise_floor_cache", {})
+    cache_key = (config.n_copies, config.noise_level, config.bases)
+    if cache_key in cache:
+        return cache[cache_key]
+    core = M1QuantumCore()
+    cal_key = keygen("_calibration", config.n_copies, message_length=1, core=core, config=config)
+    cal_sig = sign((0,), cal_key, core=core, config=config)
+    cal_records = verify(cal_sig, cal_key, core=core, config=config)
+    floor = mismatch_rate(cal_records) if cal_records else 0.0
+    cache[cache_key] = floor
+    return floor
+
+
 def _run_full_pipeline(sig: Signature) -> DetectionResult:
     records = verify(sig, st.session_state.signer_key, core=st.session_state.quantum_core, config=st.session_state.config)
-    result = evaluate(records, sig, st.session_state.seen_nonces)
+    noise_floor = _calibrated_noise_floor(st.session_state.config)
+    result = evaluate(records, sig, st.session_state.seen_nonces, noise_floor=noise_floor)
     st.session_state.seen_nonces.add(sig.nonce)
     return result
 
