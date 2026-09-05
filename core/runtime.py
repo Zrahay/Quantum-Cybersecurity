@@ -11,6 +11,7 @@ mock), which matches M4's Hoeffding independence assumption on L copies.
 
 from __future__ import annotations
 
+import concurrent.futures
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -83,11 +84,44 @@ def _require_batch(resource: object) -> EntanglementBatch:
     return resource
 
 
-def _run_one(qc: QuantumCircuit, *, seed: int | None) -> str:
-    sim = AerSimulator(seed_simulator=seed)
-    pm = generate_preset_pass_manager(backend=sim, optimization_level=0)
-    result = sim.run(pm.run(qc), shots=1, memory=True).result()
+_SIM = AerSimulator()
+_PM = generate_preset_pass_manager(backend=_SIM, optimization_level=0)
+_EXEC = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+
+
+def _run_one_impl(build_circuit, *, seed: int | None) -> str:
+    qc = build_circuit()
+    result = _SIM.run(_PM.run(qc), shots=1, memory=True, seed_simulator=seed).result()
     return result.get_memory()[0]
+
+
+def _run_one(build_circuit, *, seed: int | None) -> str:
+    """Build and execute one circuit, entirely on the single persistent
+    worker thread `_EXEC`.
+
+    Both circuit CONSTRUCTION and execution must happen on this one
+    thread -- not just execution. Qiskit's Rust-backed circuit/Aer code
+    segfaults if its first touch on a given OS thread happens deep
+    inside a live Streamlit script run: Streamlit spawns a brand-new
+    thread for every script rerun, so without this, every rerun hands
+    qiskit to a different, short-lived OS thread -- reproduced and
+    root-caused against the real dashboard, not a theoretical concern.
+    Routing all qiskit work through one long-lived worker thread avoids
+    it. `build_circuit` is a zero-arg callable so the QuantumCircuit(...)
+    construction itself -- not just sim.run -- happens on the worker
+    thread.
+    """
+    return _EXEC.submit(_run_one_impl, build_circuit, seed=seed).result()
+
+
+def run_circuit(build_circuit, *, seed: int | None = None) -> str:
+    """Public entry point for ad-hoc qiskit calls outside this module
+    (e.g. attacks/ adversaries running their own teleportation shot)
+    that need the same thread-affinity safety as `_run_one` -- see its
+    docstring. `build_circuit` is a zero-arg callable returning the
+    QuantumCircuit to run; returns the raw Aer memory string.
+    """
+    return _run_one(build_circuit, seed=seed)
 
 
 def run_teleport_bell_outcomes(
@@ -115,18 +149,20 @@ def run_teleport_bell_outcomes(
         )
     outcomes: list[tuple[int, int]] = []
     for i in range(batch.n_pairs):
-        qc = QuantumCircuit(3, 3) if preparations is not None else None
-        if preparations is not None:
-            prep_basis, prep_bit = preparations[i]
-            prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
-            qc.compose(teleportation_circuit(noise_level=level), inplace=True)
-        else:
-            qc = teleportation_circuit(noise_level=level)
-        # Reserve Bob's clbit so the memory string is always length 3 and
-        # endian indexing matches forgery / measure.
-        qc.measure(_BOB_QUBIT, _BOB_QUBIT)
+        def _build(i=i):
+            if preparations is not None:
+                qc = QuantumCircuit(3, 3)
+                prep_basis, prep_bit = preparations[i]
+                prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
+                qc.compose(teleportation_circuit(noise_level=level), inplace=True)
+            else:
+                qc = teleportation_circuit(noise_level=level)
+            # Reserve Bob's clbit so the memory string is always length 3
+            # and endian indexing matches forgery / measure.
+            qc.measure(_BOB_QUBIT, _BOB_QUBIT)
+            return qc
         shot_seed = None if seed is None else seed + i
-        outcomes.append(bell_bits_from_memory(_run_one(qc, seed=shot_seed)))
+        outcomes.append(bell_bits_from_memory(_run_one(_build, seed=shot_seed)))
     return outcomes
 
 
@@ -144,10 +180,12 @@ def run_measure_bits(
     level = _resolve_noise(batch, noise_level)
     bits: list[int] = []
     for i in range(batch.n_pairs):
-        qc = teleportation_circuit(noise_level=level)
-        measure_in_basis(qc, _BOB_QUBIT, basis)
+        def _build():
+            qc = teleportation_circuit(noise_level=level)
+            measure_in_basis(qc, _BOB_QUBIT, basis)
+            return qc
         shot_seed = None if seed is None else seed + i
-        bits.append(bob_bit_from_memory(_run_one(qc, seed=shot_seed)))
+        bits.append(bob_bit_from_memory(_run_one(_build, seed=shot_seed)))
     return bits
 
 
@@ -237,11 +275,13 @@ def run_teleport_and_measure(
             raise TypeError(
                 f"bases[{i}] must be a contracts.Basis, got {type(meas_basis).__name__}"
             )
-        qc = QuantumCircuit(3, 3)
-        prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
-        qc.compose(teleportation_circuit(noise_level=level), inplace=True)
-        measure_in_basis(qc, _BOB_QUBIT, meas_basis)
+        def _build(prep_basis=prep_basis, prep_bit=prep_bit, meas_basis=meas_basis):
+            qc = QuantumCircuit(3, 3)
+            prepare_pauli_eigenstate(qc, _MESSAGE_QUBIT, prep_basis, prep_bit)
+            qc.compose(teleportation_circuit(noise_level=level), inplace=True)
+            measure_in_basis(qc, _BOB_QUBIT, meas_basis)
+            return qc
         shot_seed = None if seed is None else seed + i
-        memory = _run_one(qc, seed=shot_seed)
+        memory = _run_one(_build, seed=shot_seed)
         results.append((bell_bits_from_memory(memory), bob_bit_from_memory(memory)))
     return results
