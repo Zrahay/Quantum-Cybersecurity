@@ -19,10 +19,9 @@ from __future__ import annotations
 import random
 import uuid
 
-from qiskit_aer import AerSimulator
-
 from attacks.base import BaseAdversary
 from contracts import PauliOp, Signature, ThreatType
+from core.runtime import run_circuit
 from core.teleportation import teleportation_circuit
 
 
@@ -59,12 +58,13 @@ class PartialKeyForgeryAdversary(BaseAdversary):
 
     def _run_teleport(self, message_bit: int) -> tuple[int, int]:
         """Run one teleportation shot and return (clbit0, clbit1)."""
-        qc = teleportation_circuit(noise_level=0.0)
-        if message_bit:
-            qc.x(0)
-        qc.measure(2, 2)
-        result = AerSimulator().run(qc, shots=1, memory=True).result()
-        bits = result.get_memory()[0]
+        def _build():
+            qc = teleportation_circuit(noise_level=0.0)
+            if message_bit:
+                qc.x(0)
+            qc.measure(2, 2)
+            return qc
+        bits = run_circuit(_build)
         return (int(bits[-1]), int(bits[-2]))
 
     def attack(self, sig: Signature) -> Signature:
