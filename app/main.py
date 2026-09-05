@@ -32,7 +32,7 @@ from attacks.trojan_horse import TrojanHorseAdversary
 from attacks.mitm_classical import MitmClassicalAdversary
 from detection.detector import evaluate
 from detection.statistics import mismatch_rate
-from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
+from protocol import keygen, sign, verify, QDSConfig, MockQuantumCore, M1QuantumCore
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +189,8 @@ def _init_state() -> None:
         "seen_nonces": set(),
         "last_signature": None,
         "last_detection": None,
-        "quantum_core": M1QuantumCore(),
-        "config": QDSConfig(bases=(Basis.Z, Basis.X)),
+        "quantum_core": MockQuantumCore(),
+        "config": QDSConfig(n_copies=256, bases=(Basis.Z, Basis.X)),
         # The number of message bits the active key was generated for.
         # Independent of n_copies (L) -- P1's message_length and its
         # security parameter L are two different dials. Tracked here
@@ -360,7 +360,7 @@ with st.sidebar:
     n_copies = st.number_input(
         "Copies (L)",
         min_value=1,
-        max_value=128,
+        max_value=512,
         value=st.session_state.config.n_copies,
         step=1,
         help="Number of signature copies per verifier, per message bit. Higher L = stronger security.",
@@ -391,7 +391,7 @@ with st.sidebar:
             # message_length rather than letting sign() raise a
             # ValueError the user has to decode from a traceback.
             st.session_state.message_input = "10" * (message_length // 2) + ("1" if message_length % 2 else "")
-            st.session_state.quantum_core = M1QuantumCore()
+            st.session_state.quantum_core = MockQuantumCore()
             st.session_state.signer_key = keygen(
                 signer_id, n_copies,
                 message_length=message_length,
@@ -569,8 +569,8 @@ def main() -> None:
         "Forgery": (ForgeryAdversary(strength=1.0), "🔴 Forgery", "attack-forgery", "Random Pauli ops, real teleportation outcomes"),
         "Channel Tamper": (ChannelTamperAdversary(strength=1.0), "🟢 Channel Tamper", "attack-channel_tamper", "Flips bell outcome bits in transit"),
         "Impersonation": (ImpersonationAdversary(claimed_identity=st.session_state.signer_id, strength=1.0), "🟠 Impersonation", "attack-impersonation", "Fabricates key_id + random ops/outcomes"),
-        "PNS": (PNSAdversary(strength=1.0), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
-        "Collective": (CollectiveAttackAdversary(strength=0.5), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
+        "PNS": (PNSAdversary(strength=0.1), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
+        "Collective": (CollectiveAttackAdversary(strength=0.1), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
         "Faked-State": (FakedStateAdversary(strength=1.0), "⚪ Faked-State", "attack-faked_state", "Forces detector outcome, zero disturbance"),
         "Time-Shift": (TimeShiftAdversary(strength=1.0), "🟡 Time-Shift", "attack-time_shift", "Exploits detector timing mismatch via timestamp"),
         "Trojan-Horse": (TrojanHorseAdversary(strength=1.0), "🟤 Trojan-Horse", "attack-trojan_horse", "Learns ops via injected light, zero disturbance (hardware defence)"),
