@@ -6,8 +6,11 @@ engine ever disagree you will find out live in front of a judge.
 
 from __future__ import annotations
 
+import math
 import time
 
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 from contracts import (
@@ -644,7 +647,7 @@ def main() -> None:
                 tampered_sig = attack_adv.attack(st.session_state.last_signature)
                 # Channel tamper's real signal is through noise_level, not bell_outcomes.
                 # Check if the adversary reports a noise_level override.
-                nl_override = getattr(attack_adv, 'noise_level_override', lambda: None)()
+                nl_override = attack_adv.noise_level_override()
                 records = verify(
                     tampered_sig, st.session_state.signer_key,
                     noise_level=nl_override,
@@ -703,7 +706,6 @@ def main() -> None:
     st.markdown("### 📋 Event Log")
 
     if st.session_state.event_log:
-        import pandas as pd
         df = pd.DataFrame(st.session_state.event_log)
 
         # Column order
@@ -755,14 +757,10 @@ def main() -> None:
     # --- Evidence Panel: Plots ---
     st.markdown("### 📈 Evidence")
 
-    import math
-    import numpy as np
-
     tab1, tab2, tab3 = st.tabs(["Mismatch History", "Forgery Probability Curve", "Noise Sweep"])
 
     with tab1:
         if st.session_state.event_log:
-            import pandas as pd
             log_df = pd.DataFrame(st.session_state.event_log)
             log_df["mismatch_pct"] = log_df["mismatch"].str.rstrip("%").astype(float)
             log_df["idx"] = range(len(log_df) - 1, -1, -1)
@@ -778,6 +776,7 @@ def main() -> None:
             st.info("Sign a message or launch an attack to see the mismatch history.")
 
     with tab2:
+        message_length_for_curve = 2
         L_range = np.arange(8, 512, 8)
         p_f = 1e-6
         noise_floor = 0.0
@@ -788,7 +787,13 @@ def main() -> None:
             margin = math.sqrt(-math.log(pf) / (2.0 * n))
             return min(nf + margin, 1.0)
 
-        s_a_values = [hoeffding_s_a(int(l / 2), noise_floor, p_f) for l in L_range]
+        # K = message_length * L is the total elements a signature reveals;
+        # the number of CONCLUSIVE elements n is ~K/2 (see
+        # protocol/verifier.py's "STATE ELIMINATION" docstring).
+        s_a_values = [
+            hoeffding_s_a(int(message_length_for_curve * l / 2), noise_floor, p_f)
+            for l in L_range
+        ]
 
         curve_df = pd.DataFrame({
             "L": L_range,
@@ -805,24 +810,43 @@ def main() -> None:
 
         # Mark current L
         current_L = st.session_state.config.n_copies
-        current_s_a = hoeffding_s_a(current_L // 2, noise_floor, p_f)
+        current_n = int(message_length_for_curve * current_L / 2)
+        current_s_a = hoeffding_s_a(current_n, noise_floor, p_f)
         st.metric("Current L", current_L, help="Your active signature copies")
         st.metric("Current s_a", f"{current_s_a:.3f}", help="Acceptance threshold at this L")
 
     with tab3:
-        noise_levels = np.arange(0.0, 1.05, 0.05)
-        L = 64
-        msg_len = 2
-        expected_mismatch = []
+        sweep_L = st.session_state.config.n_copies
+        sweep_bases = st.session_state.config.bases
+        sweep_cache = st.session_state.setdefault("_noise_sweep_cache", {})
+        sweep_cache_key = (sweep_L, sweep_bases)
 
-        for nl in noise_levels:
-            # Approximate: mismatch ≈ noise_level * (fraction of conclusive elements)
-            # On ideal channel, mismatch ≈ noise_level * 0.5 (half elements conclusive)
-            expected_mismatch.append(nl * 0.5 * 100)
+        if sweep_cache_key not in sweep_cache:
+            noise_levels = np.linspace(0.0, 1.0, 11)
+            measured_mismatch = []
+            sweep_core = M1QuantumCore()
+            for nl in noise_levels:
+                sweep_config = QDSConfig(
+                    n_copies=sweep_L,
+                    noise_level=float(nl),
+                    bases=sweep_bases,
+                )
+                sweep_key = keygen(
+                    "_noise_sweep", sweep_L, message_length=1,
+                    core=sweep_core, config=sweep_config,
+                )
+                sweep_sig = sign((0,), sweep_key, core=sweep_core, config=sweep_config)
+                sweep_records = verify(sweep_sig, sweep_key, core=sweep_core, config=sweep_config)
+                measured_mismatch.append(
+                    mismatch_rate(sweep_records) * 100 if sweep_records else 0.0
+                )
+            sweep_cache[sweep_cache_key] = (noise_levels, measured_mismatch)
+
+        noise_levels, measured_mismatch = sweep_cache[sweep_cache_key]
 
         sweep_df = pd.DataFrame({
             "Noise Level": [f"{nl:.0%}" for nl in noise_levels],
-            "Expected Mismatch (%)": expected_mismatch,
+            "Measured Mismatch (%)": measured_mismatch,
         })
 
         st.line_chart(
@@ -831,7 +855,12 @@ def main() -> None:
             height=300,
             color=["#ffc107"],
         )
-        st.caption("Theoretical mismatch rate vs channel noise level (L=64, message_length=2)")
+        st.caption(
+            f"Empirically measured mismatch rate vs channel noise level "
+            f"(L={sweep_L}, one throwaway keygen/sign/verify per point). "
+            "noise_level is a depolarising-channel dial, not the mismatch "
+            "rate itself -- see _calibrated_noise_floor()."
+        )
 
     # --- Footer ---
     st.markdown("---")
