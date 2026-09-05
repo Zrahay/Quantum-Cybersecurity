@@ -32,7 +32,7 @@ from attacks.trojan_horse import TrojanHorseAdversary
 from attacks.mitm_classical import MitmClassicalAdversary
 from detection.detector import evaluate
 from detection.statistics import mismatch_rate
-from protocol import keygen, sign, verify, QDSConfig, MockQuantumCore
+from protocol import keygen, sign, verify, QDSConfig, MockQuantumCore, M1QuantumCore
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +267,7 @@ def _calibrated_noise_floor(config: QDSConfig) -> float:
     cache_key = (config.n_copies, config.noise_level, config.bases)
     if cache_key in cache:
         return cache[cache_key]
-    core = MockQuantumCore()
+    core = M1QuantumCore()
     cal_key = keygen("_calibration", config.n_copies, message_length=1, core=core, config=config)
     cal_sig = sign((0,), cal_key, core=core, config=config)
     cal_records = verify(cal_sig, cal_key, core=core, config=config)
@@ -838,7 +838,7 @@ def main() -> None:
         if sweep_cache_key not in sweep_cache:
             noise_levels = np.linspace(0.0, 1.0, 11)
             measured_mismatch = []
-            sweep_core = MockQuantumCore()
+            sweep_core = M1QuantumCore()
             for nl in noise_levels:
                 sweep_config = QDSConfig(
                     n_copies=sweep_L,
