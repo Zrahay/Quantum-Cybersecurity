@@ -190,7 +190,7 @@ def _init_state() -> None:
         "last_signature": None,
         "last_detection": None,
         "quantum_core": MockQuantumCore(),
-        "config": QDSConfig(bases=(Basis.Z, Basis.X)),
+        "config": QDSConfig(n_copies=256, bases=(Basis.Z, Basis.X)),
         # The number of message bits the active key was generated for.
         # Independent of n_copies (L) -- P1's message_length and its
         # security parameter L are two different dials. Tracked here
@@ -360,7 +360,7 @@ with st.sidebar:
     n_copies = st.number_input(
         "Copies (L)",
         min_value=1,
-        max_value=128,
+        max_value=512,
         value=st.session_state.config.n_copies,
         step=1,
         help="Number of signature copies per verifier, per message bit. Higher L = stronger security.",
@@ -569,8 +569,8 @@ def main() -> None:
         "Forgery": (ForgeryAdversary(strength=1.0), "🔴 Forgery", "attack-forgery", "Random Pauli ops, real teleportation outcomes"),
         "Channel Tamper": (ChannelTamperAdversary(strength=1.0), "🟢 Channel Tamper", "attack-channel_tamper", "Flips bell outcome bits in transit"),
         "Impersonation": (ImpersonationAdversary(claimed_identity=st.session_state.signer_id, strength=1.0), "🟠 Impersonation", "attack-impersonation", "Fabricates key_id + random ops/outcomes"),
-        "PNS": (PNSAdversary(strength=1.0), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
-        "Collective": (CollectiveAttackAdversary(strength=0.5), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
+        "PNS": (PNSAdversary(strength=0.1), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
+        "Collective": (CollectiveAttackAdversary(strength=0.1), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
         "Faked-State": (FakedStateAdversary(strength=1.0), "⚪ Faked-State", "attack-faked_state", "Forces detector outcome, zero disturbance"),
         "Time-Shift": (TimeShiftAdversary(strength=1.0), "🟡 Time-Shift", "attack-time_shift", "Exploits detector timing mismatch via timestamp"),
         "Trojan-Horse": (TrojanHorseAdversary(strength=1.0), "🟤 Trojan-Horse", "attack-trojan_horse", "Learns ops via injected light, zero disturbance (hardware defence)"),
