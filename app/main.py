@@ -32,7 +32,7 @@ from attacks.trojan_horse import TrojanHorseAdversary
 from attacks.mitm_classical import MitmClassicalAdversary
 from detection.detector import evaluate
 from detection.statistics import mismatch_rate
-from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
+from protocol import keygen, sign, verify, QDSConfig, MockQuantumCore
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def _init_state() -> None:
         "seen_nonces": set(),
         "last_signature": None,
         "last_detection": None,
-        "quantum_core": M1QuantumCore(),
+        "quantum_core": MockQuantumCore(),
         "config": QDSConfig(bases=(Basis.Z, Basis.X)),
         # The number of message bits the active key was generated for.
         # Independent of n_copies (L) -- P1's message_length and its
@@ -267,7 +267,7 @@ def _calibrated_noise_floor(config: QDSConfig) -> float:
     cache_key = (config.n_copies, config.noise_level, config.bases)
     if cache_key in cache:
         return cache[cache_key]
-    core = M1QuantumCore()
+    core = MockQuantumCore()
     cal_key = keygen("_calibration", config.n_copies, message_length=1, core=core, config=config)
     cal_sig = sign((0,), cal_key, core=core, config=config)
     cal_records = verify(cal_sig, cal_key, core=core, config=config)
@@ -391,7 +391,7 @@ with st.sidebar:
             # message_length rather than letting sign() raise a
             # ValueError the user has to decode from a traceback.
             st.session_state.message_input = "10" * (message_length // 2) + ("1" if message_length % 2 else "")
-            st.session_state.quantum_core = M1QuantumCore()
+            st.session_state.quantum_core = MockQuantumCore()
             st.session_state.signer_key = keygen(
                 signer_id, n_copies,
                 message_length=message_length,
@@ -838,7 +838,7 @@ def main() -> None:
         if sweep_cache_key not in sweep_cache:
             noise_levels = np.linspace(0.0, 1.0, 11)
             measured_mismatch = []
-            sweep_core = M1QuantumCore()
+            sweep_core = MockQuantumCore()
             for nl in noise_levels:
                 sweep_config = QDSConfig(
                     n_copies=sweep_L,
