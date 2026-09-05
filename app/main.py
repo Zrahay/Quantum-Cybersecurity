@@ -808,12 +808,26 @@ def main() -> None:
         )
         st.caption("Hoeffding-derived acceptance threshold vs L (message_length=2). Forgery probability ≤ 10⁻⁶")
 
-        # Mark current L
+        # Mark current L, using the ACTIVE key's real message_length and the
+        # real measured noise floor (not the curve's illustrative message_length=2
+        # / ideal-channel assumptions) so this number matches the threshold
+        # evaluate() actually used on the last signature -- CLAUDE.md: s_a/s_v
+        # are derived from the measured noise floor and p_f, never hardcoded.
         current_L = st.session_state.config.n_copies
-        current_n = int(message_length_for_curve * current_L / 2)
-        current_s_a = hoeffding_s_a(current_n, noise_floor, p_f)
+        current_message_length = st.session_state.message_length
+        current_noise_floor = _calibrated_noise_floor(st.session_state.config)
+        current_n = int(current_message_length * current_L / 2)
+        current_s_a = hoeffding_s_a(current_n, current_noise_floor, p_f)
         st.metric("Current L", current_L, help="Your active signature copies")
-        st.metric("Current s_a", f"{current_s_a:.3f}", help="Acceptance threshold at this L")
+        st.metric(
+            "Current s_a", f"{current_s_a:.3f}",
+            help=(
+                f"Acceptance threshold at this L, using the active key's "
+                f"message_length={current_message_length} and measured noise "
+                f"floor={current_noise_floor:.3f} -- matches the threshold "
+                f"evaluate() actually applies, not the illustrative curve above."
+            ),
+        )
 
     with tab3:
         sweep_L = st.session_state.config.n_copies
