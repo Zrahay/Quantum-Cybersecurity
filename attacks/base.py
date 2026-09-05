@@ -27,3 +27,18 @@ class BaseAdversary:
 
     def attack(self, sig: Signature) -> Signature:
         raise NotImplementedError
+
+    def noise_level_override(self) -> float | None:
+        """A channel noise_level this adversary wants `verify()` run at, or
+        None to leave the caller's default untouched.
+
+        Most adversaries tamper with the SIGNATURE and have nothing to say
+        about the channel, so None is correct for them. ChannelTamperAdversary
+        is the one exception: real channel tampering is a property of the
+        physical channel, not of the Signature object (see the note at the
+        bottom of contracts.py), so its attack has to travel out-of-band from
+        `attack()`'s return value. A caller who wants that adversary's attack
+        to actually be detectable must read this and pass it to
+        `verify(sig, key, noise_level=adversary.noise_level_override())`.
+        """
+        return None

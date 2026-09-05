@@ -1,12 +1,14 @@
 """Tests for the M1 <-> M2 seam. Track M2 (Shubhang).
 
-Covers the QuantumCore interface, its validator, and the development mock.
+Covers the QuantumCore interface, its validator, the development mock, and
+the real M1 adapter.
 
-The mock's tests assert DETERMINISM AND SHAPE ONLY. They deliberately assert
-nothing about physics, because the mock has none -- it returns seeded
-pseudo-random bits. Any test here that started checking correlation rates or
-noise floors would be measuring `random.Random`, and would be quoted at us
-later as if it meant something.
+The mock's `teleport_and_measure` is the one exception to "shape only": it
+is an analytically exact ideal-channel model (same-basis -> certain
+eigenvalue bit, cross-basis -> uniform), so its physics assertions ARE
+evidence about the protocol logic. They are NOT evidence about the real
+channel -- `tests/test_runtime.py` pins the Aer path to the same physics,
+and the mock's noise model is a per-bit flip, not a depolarising error.
 """
 
 import importlib.util
@@ -148,40 +150,192 @@ class TestMockShapeAndValidation(unittest.TestCase):
             self.core.measure(self.core.bell_pairs(4), "Z")
 
 
-class TestM1AdapterRefusesRatherThanGuesses(unittest.TestCase):
-    """The gaps between what M2 wants and what core/ exposes, pinned down.
+@unittest.skipUnless(importlib.util.find_spec("qiskit"), "Qiskit not installed")
+class TestM1AdapterDelegatesToCore(unittest.TestCase):
+    """Real backend: shape only. Physics fidelity lives in tests/test_runtime.py.
 
-    Each of these is a TODO in quantum_interface.py. When Ashab lands the
-    corresponding M1 entry point, the assertion below fails -- which is the
-    signal to implement the adapter method and rewrite the test. A failure
-    here is progress, not a regression.
+    Skipped without Qiskit so M2's suite can still run where Aer is absent;
+    the adapter imports core/ lazily on purpose.
     """
 
     def setUp(self):
         self.core = M1QuantumCore()
 
-    def test_no_entanglement_resource_api_yet(self):
-        with self.assertRaises(QuantumCoreError):
-            self.core.bell_pairs(4)
+    def test_bell_pairs_returns_a_handle(self):
+        resource = self.core.bell_pairs(4)
+        self.assertIsNotNone(resource)
 
-    def test_teleport_returns_a_circuit_not_outcomes_yet(self):
-        with self.assertRaises(QuantumCoreError):
+    def test_teleport_returns_one_bit_pair_per_copy(self):
+        outcomes = self.core.teleport(self.core.bell_pairs(8))
+        self.assertEqual(len(outcomes), 8)
+        for pair in outcomes:
+            self.assertEqual(len(pair), 2)
+            self.assertTrue(all(bit in (0, 1) for bit in pair))
+
+    def test_measure_returns_classical_bits(self):
+        bits = self.core.measure(self.core.bell_pairs(8), Basis.Z)
+        self.assertEqual(len(bits), 8)
+        self.assertEqual(set(bits) - {0, 1}, set())
+
+    def test_teleport_rejects_a_non_batch_resource(self):
+        with self.assertRaises(TypeError):
             self.core.teleport(object())
 
-    def test_measure_in_basis_returns_none_yet(self):
-        with self.assertRaises(QuantumCoreError):
-            self.core.measure(object(), Basis.Z)
-
-    @unittest.skipUnless(importlib.util.find_spec("qiskit"), "Qiskit not installed")
     def test_correction_for_delegates_to_m1(self):
-        """The one method M1 already exposes. Shape only -- M1 owns the table.
-
-        Skipped rather than unconditional because `core.pauli` imports Qiskit
-        and the adapter imports it lazily on purpose: M2's suite must run in
-        an environment without Aer. If this test forces the import at module
-        scope, that property is lost.
-        """
+        """Shape only -- M1 owns the table."""
         self.assertIsInstance(self.core.correction_for((0, 0)), PauliOp)
+
+
+class TestMockTeleportAndMeasure(unittest.TestCase):
+    """The mock's `teleport_and_measure` is an analytically exact ideal channel.
+
+    Same basis -> the prepared bit, with certainty. Cross basis -> uniform.
+    These assertions are about the PROTOCOL LOGIC the mock exists to test,
+    not about real quantum mechanics; `tests/test_runtime.py` pins the Aer
+    path to the same two properties.
+    """
+
+    def setUp(self):
+        self.core = MockQuantumCore(seed=SEED)
+
+    def test_same_basis_returns_prepared_bit_with_certainty(self):
+        """The core P1 acceptance property, in closed form.
+
+        On an ideal channel, an eigenstate of P measured in P's basis
+        returns its eigenvalue bit with certainty. Any deviation here is a
+        mock bug, and the same deviation in the real backend would reject
+        every legitimate signature.
+        """
+        n = 64
+        resource = self.core.bell_pairs(n)
+        preparations = [(Basis.Z, bit) for bit in [0, 1] * (n // 2)]
+        bases = [Basis.Z] * n
+        results = self.core.teleport_and_measure(resource, preparations, bases)
+        self.assertEqual(len(results), n)
+        for (prep_basis, prep_bit), meas_basis, (_bell, observed) in zip(
+            preparations, bases, results
+        ):
+            self.assertEqual(observed, prep_bit)
+
+    def test_cross_basis_outcome_is_uniform(self):
+        """A different-basis measurement carries no information about the bit.
+
+        Over enough copies, the 0/1 split should be roughly even. This is
+        the property that makes state elimination work: the cross-basis
+        half is discarded because it is pure noise.
+        """
+        n = 200
+        resource = self.core.bell_pairs(n)
+        preparations = [(Basis.Z, 0)] * n  # all |0>
+        bases = [Basis.X] * n              # measure in X
+        results = self.core.teleport_and_measure(resource, preparations, bases)
+        bits = [obs for _bell, obs in results]
+        # Expect roughly 50/50; allow a wide band for finite-sample noise.
+        self.assertGreater(sum(bits), n * 0.30, f"cross-basis too skewed: {sum(bits)}/{n}")
+        self.assertLess(sum(bits), n * 0.70, f"cross-basis too skewed: {sum(bits)}/{n}")
+
+    def test_returns_bell_outcome_and_bit_from_same_shot(self):
+        """Each result is ((clbit0, clbit1), bob_bit), both halves from one shot."""
+        resource = self.core.bell_pairs(8)
+        preparations = [(Basis.Z, 0)] * 8
+        bases = [Basis.Z] * 8
+        results = self.core.teleport_and_measure(resource, preparations, bases)
+        for bell, bit in results:
+            self.assertEqual(len(bell), 2)
+            self.assertTrue(all(b in (0, 1) for b in bell))
+            self.assertIn(bit, (0, 1))
+
+    def test_length_mismatch_raises(self):
+        resource = self.core.bell_pairs(8)
+        with self.assertRaises(ValueError):
+            self.core.teleport_and_measure(resource, [(Basis.Z, 0)] * 7, [Basis.Z] * 8)
+        with self.assertRaises(ValueError):
+            self.core.teleport_and_measure(resource, [(Basis.Z, 0)] * 8, [Basis.Z] * 7)
+
+    def test_rejects_non_probability_noise(self):
+        resource = self.core.bell_pairs(4)
+        preps = [(Basis.Z, 0)] * 4
+        bases = [Basis.Z] * 4
+        with self.assertRaises(ValueError):
+            self.core.teleport_and_measure(resource, preps, bases, noise_level=1.5)
+
+    def test_rejects_non_basis_argument(self):
+        resource = self.core.bell_pairs(4)
+        with self.assertRaises(TypeError):
+            self.core.teleport_and_measure(
+                resource, [("Z", 0)] * 4, [Basis.Z] * 4
+            )
+        with self.assertRaises(TypeError):
+            self.core.teleport_and_measure(
+                resource, [(Basis.Z, 0)] * 4, ["Z"] * 4
+            )
+
+    def test_rejects_non_bit_preparation(self):
+        resource = self.core.bell_pairs(4)
+        with self.assertRaises(ValueError):
+            self.core.teleport_and_measure(
+                resource, [(Basis.Z, 2)] * 4, [Basis.Z] * 4
+            )
+
+    def test_noise_can_flip_a_same_basis_bit(self):
+        """At noise_level=1.0 every bit flips, so same-basis reads the opposite."""
+        n = 32
+        resource = self.core.bell_pairs(n)
+        preparations = [(Basis.Z, 0)] * n
+        bases = [Basis.Z] * n
+        results = self.core.teleport_and_measure(
+            resource, preparations, bases, noise_level=1.0
+        )
+        bits = [obs for _bell, obs in results]
+        self.assertEqual(set(bits), {1}, f"noise=1.0 should flip every bit, got {bits}")
+
+
+@unittest.skipUnless(importlib.util.find_spec("qiskit"), "Qiskit not installed")
+class TestM1AdapterTeleportAndMeasure(unittest.TestCase):
+    """Real backend: shape and the same-basis certainty property.
+
+    Pins the Aer path to the same physics the mock asserts in
+    TestMockTeleportAndMeasure, so a mock pass plus a runtime pass is
+    evidence the protocol logic is correct AND the backend is faithful.
+    """
+
+    def setUp(self):
+        self.core = M1QuantumCore(seed=SEED)
+
+    def test_returns_one_result_per_copy(self):
+        n = 8
+        resource = self.core.bell_pairs(n)
+        preparations = [(Basis.Z, 0)] * n
+        bases = [Basis.Z] * n
+        results = self.core.teleport_and_measure(resource, preparations, bases)
+        self.assertEqual(len(results), n)
+        for bell, bit in results:
+            self.assertEqual(len(bell), 2)
+            self.assertTrue(all(b in (0, 1) for b in bell))
+            self.assertIn(bit, (0, 1))
+
+    def test_same_basis_is_certain_on_ideal_channel(self):
+        """|0> teleported and Z-measured reads 0 almost always.
+
+        We allow a small error band for Aer shot noise and any residual
+        gate infidelity; the mock asserts exactness, the real backend
+        asserts "overwhelmingly". A 50% rate here would indicate the
+        endian bug or a broken correction table.
+        """
+        n = 64
+        resource = self.core.bell_pairs(n)
+        preparations = [(Basis.Z, 0)] * n
+        bases = [Basis.Z] * n
+        results = self.core.teleport_and_measure(resource, preparations, bases)
+        bits = [obs for _bell, obs in results]
+        self.assertGreaterEqual(
+            bits.count(0) / n, 0.95,
+            f"same-basis certainty broken: {bits.count(0)}/{n} zeros",
+        )
+
+    def test_rejects_non_batch_resource(self):
+        with self.assertRaises(TypeError):
+            self.core.teleport_and_measure(object(), [], [])
 
 
 if __name__ == "__main__":

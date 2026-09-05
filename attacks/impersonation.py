@@ -8,13 +8,9 @@ material — Eve does NOT possess Alice's private key or quantum
 resource.  The ``key_id`` is fabricated (does not correspond to a
 real key), and ``declared_ops`` are random.
 
-``strength`` controls the fraction of message bits Eve attempts to
-sign (0.0 = no impersonation, 1.0 = full impersonation).
-
-**PLACEHOLDER — depends on M2's keygen design.**  This file will need
-revision once the real ``KeyPair`` / ``sign()`` interface is confirmed.
-The current version is structurally complete but uses mock objects in
-place of real key material.
+``strength`` controls the fraction of a signature's elements Eve
+randomises (0.0 = no impersonation, 1.0 = full impersonation), sized off
+``len(sig.declared_ops)`` -- see `attack()`.
 
 No AI/ML is used.
 """
@@ -39,7 +35,8 @@ class ImpersonationAdversary(BaseAdversary):
 
     Detection signals for M4:
     - ``key_id`` does not correspond to any real key.
-    - ``declared_ops`` vs ``bell_outcomes`` mismatch rate ~50 %.
+    - ``declared_ops`` vs the recipient's own measurement disagree at the
+      usual ~1/4 forgery rate on conclusive elements.
     """
 
     threat = ThreatType.IMPERSONATION
@@ -58,7 +55,12 @@ class ImpersonationAdversary(BaseAdversary):
         return self._claimed_identity
 
     def attack(self, sig: Signature) -> Signature:
-        n = len(sig.message)
+        # Sized off the real element count a signature carries
+        # (message_length * L), not len(sig.message): a real signature's
+        # message is short while its element count is in the hundreds.
+        # Sizing off the message length would leave most elements as
+        # Alice's real, undisturbed data. Caught in M2 review.
+        n = len(sig.declared_ops)
 
         # Eve fabricates a key_id — she doesn't know the real one
         forged_key_id = f"fake-key-{uuid.uuid4().hex[:6]}"

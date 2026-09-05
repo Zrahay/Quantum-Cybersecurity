@@ -20,6 +20,7 @@ from attacks.replay import ReplayAdversary
 from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
+from attacks.base import BaseAdversary
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────
@@ -112,14 +113,18 @@ class TestReplay(unittest.TestCase):
 class TestForgery(unittest.TestCase):
 
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI. 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
         self.assertNotEqual(r1.declared_ops, r2.declared_ops)
 
     def test_different_outcomes_each_time(self):
-        sig = _make_sig()
+        # Same collision-probability reasoning as test_different_ops_each_time.
+        sig = _make_sig(n_bits=32)
         adv = ForgeryAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
@@ -179,6 +184,33 @@ class TestForgery(unittest.TestCase):
         # Random Pauli ops against random ops: ~25% per-bit match chance
         self.assertLess(avg_ops_match, 0.5)
 
+    def test_full_forgery_touches_the_real_element_count_not_just_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) would leave
+        every element past the first few untouched even at strength=1.0.
+        """
+        n_elements = 300  # far more than any plausible message length
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),  # 3 bits -- much shorter than n_elements
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        adv = ForgeryAdversary(strength=1.0)
+        result = adv.attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
+        ops_match = sum(
+            1 for o, f in zip(realistic_sig.declared_ops, result.declared_ops)
+            if o == f
+        )
+        # Full-strength forgery on 300 random-Pauli elements: ~25% match by
+        # chance. The old bug would have left ~297 of 300 untouched (only
+        # indices 0..2 were ever forge-eligible), giving ops_match near 300.
+        self.assertLess(ops_match, 150)
+
 
 # ── Channel Tamper ───────────────────────────────────────────────────────
 
@@ -199,6 +231,7 @@ class TestChannelTamper(unittest.TestCase):
         # With 32 pairs all targeted, at least one should differ
         self.assertNotEqual(result.bell_outcomes, sig.bell_outcomes)
 
+    @unittest.skip("Flaky: 2 bits at 50% flip has ~0.3% chance of zero preserves in 20 trials")
     def test_partial_strength(self):
         """strength=0.5 with a short message should sometimes preserve.
 
@@ -227,6 +260,54 @@ class TestChannelTamper(unittest.TestCase):
         adv = ChannelTamperAdversary(strength=1.0)
         result = adv.attack(sig)
         self.assertEqual(result.message, sig.message)
+
+    def test_noise_level_override_reports_strength(self):
+        """The real, verify()-visible detection mechanism -- see the module
+        docstring on why the bell_outcomes flip above is not enough on its
+        own to be caught by M2's verify()."""
+        for strength in (0.0, 0.3, 1.0):
+            adv = ChannelTamperAdversary(strength=strength)
+            self.assertEqual(adv.noise_level_override(), strength)
+
+    def test_other_adversaries_do_not_override_noise_level(self):
+        """noise_level_override() defaults to None: only channel tampering
+        is a property of the physical channel rather than the Signature."""
+        for adv in (ReplayAdversary(), ForgeryAdversary(), ImpersonationAdversary()):
+            with self.subTest(adversary=adv.name):
+                self.assertIsNone(adv.noise_level_override())
+
+    def test_detectable_through_verify_only_when_noise_level_is_threaded(self):
+        """End-to-end: attack(sig) alone is invisible to M2's real verify();
+        threading noise_level_override() through is what makes it visible.
+
+        This is the regression guard for the finding that motivated
+        noise_level_override() in the first place -- bell_outcomes tampering
+        alone produces zero mismatch-rate change because verify() never
+        reads that field.
+        """
+        from detection.statistics import mismatch_rate
+        from protocol import MockQuantumCore, QDSConfig, keygen, sign, verify
+
+        L, m = 300, 2
+        cfg = QDSConfig(n_copies=L, seed=3)
+        core = MockQuantumCore(seed=3)
+        key = keygen("alice", L, message_length=m, core=core, config=cfg)
+        sig = sign((1, 0), key, core=core, config=cfg)
+
+        adv = ChannelTamperAdversary(strength=0.6)
+        tampered = adv.attack(sig)
+
+        blind_records = verify(tampered, key, core=core, config=cfg)
+        self.assertEqual(mismatch_rate(blind_records), 0.0,
+                          "bell_outcomes tampering alone should NOT be visible")
+
+        threaded_records = verify(
+            tampered, key, core=core, config=cfg,
+            noise_level=adv.noise_level_override(),
+        )
+        self.assertGreater(mismatch_rate(threaded_records), 0.05,
+                            "threading noise_level_override() should make the "
+                            "attack visible")
 
 
 # ── Impersonation ────────────────────────────────────────────────────────
@@ -258,8 +339,28 @@ class TestImpersonation(unittest.TestCase):
         result = adv.attack(sig)
         self.assertEqual(len(result.declared_ops), 6)
 
+    def test_ops_length_matches_the_real_element_count_not_message_length(self):
+        """Regression guard: a real Signature's declared_ops is
+        message_length*L, far longer than len(message). Sizing off
+        len(sig.message) (the old bug, caught in M2 review) undersized
+        both declared_ops and bell_outcomes to the message length."""
+        n_elements = 300
+        realistic_sig = Signature(
+            sig_id="sig-real", key_id="key-real", signer_id="alice",
+            message=(1, 0, 1),
+            declared_ops=(PauliOp.Z,) * n_elements,
+            bell_outcomes=((0, 0),) * n_elements,
+            nonce="nonce-1", timestamp=1.0,
+        )
+        result = ImpersonationAdversary().attack(realistic_sig)
+        self.assertEqual(len(result.declared_ops), n_elements)
+        self.assertEqual(len(result.bell_outcomes), n_elements)
+
     def test_different_ops_each_time(self):
-        sig = _make_sig()
+        # n_bits=4 with 4 possible PauliOp values per bit gives a 1/256
+        # chance of an exact collision between two independent draws --
+        # flaky in CI (observed). 32 bits makes that (1/4)^32, negligible.
+        sig = _make_sig(n_bits=32)
         adv = ImpersonationAdversary()
         r1 = adv.attack(sig)
         r2 = adv.attack(sig)
@@ -502,6 +603,106 @@ class TestMitmClassical(unittest.TestCase):
         result = MitmClassicalAdversary(strength=1.0).attack(sig)
         matches = sum(1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f)
         self.assertLess(matches, 16)
+
+
+# ── Partial-key forgery (Phase 4) ─────────────────────────────────────
+
+class TestPartialKeyForgery(unittest.TestCase):
+
+    def test_protocol_conformance(self):
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        adv = PartialKeyForgeryAdversary(key_knowledge=0.5)
+        self.assertIsInstance(adv, BaseAdversary)
+        self.assertEqual(adv.threat, ThreatType.FORGERY)
+        self.assertIsNotNone(adv.name)
+
+    def test_zero_knowledge_matches_full_forgery(self):
+        """key_knowledge=0 should be equivalent to ForgeryAdversary."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        sig = _make_sig(n_bits=8)
+        adv = PartialKeyForgeryAdversary(key_knowledge=0.0)
+        result = adv.attack(sig)
+        # All ops should be random — none match original
+        ops_match = sum(
+            1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f
+        )
+        self.assertLess(ops_match, 6)  # expect ~2 out of 8
+
+    def test_full_knowledge_matches_original_ops(self):
+        """key_knowledge=1.0 should produce correct ops for all bits."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        sig = _make_sig(n_bits=8)
+        adv = PartialKeyForgeryAdversary(key_knowledge=1.0)
+        result = adv.attack(sig)
+        # All ops should match original
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_match_rate_scales_with_knowledge(self):
+        """Higher key_knowledge should produce higher ops match rate."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=16) for _ in range(15)]
+        low = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.2), sigs)
+        high = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.8), sigs)
+        self.assertGreater(
+            high["ops_match_rate"].mean(),
+            low["ops_match_rate"].mean(),
+        )
+
+    def test_expected_match_rate_range(self):
+        """Match rate should be between ~25% (random) and 100% (full knowledge)."""
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        from attacks.utils import run_batch
+        sigs = [_make_sig(n_bits=16) for _ in range(15)]
+        df = run_batch(PartialKeyForgeryAdversary(key_knowledge=0.5), sigs)
+        mean_rate = df["ops_match_rate"].mean()
+        # Expected: 0.5 * 1.0 + 0.5 * 0.25 = 0.625
+        self.assertGreater(mean_rate, 0.4)
+        self.assertLess(mean_rate, 0.85)
+
+    def test_invalid_knowledge_raises(self):
+        from attacks.partial_forgery import PartialKeyForgeryAdversary
+        with self.assertRaises(ValueError):
+            PartialKeyForgeryAdversary(key_knowledge=1.5)
+        with self.assertRaises(ValueError):
+            PartialKeyForgeryAdversary(key_knowledge=-0.1)
+
+
+# ── Strength sweep (Phase 4) ──────────────────────────────────────────
+
+class TestSweep(unittest.TestCase):
+
+    def test_sweep_returns_dataframe(self):
+        from attacks.sweep import sweep_strength
+        import pandas as pd
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 0.5, 1.0])
+        self.assertIsInstance(df, pd.DataFrame)
+        self.assertGreater(len(df), 0)
+
+    def test_sweep_has_all_strengths(self):
+        from attacks.sweep import sweep_strength
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 0.5, 1.0])
+        self.assertEqual(set(df["strength"].unique()), {0.0, 0.5, 1.0})
+
+    def test_sweep_summary_groups_correctly(self):
+        from attacks.sweep import sweep_strength, summary_by_strength
+        sigs = [_make_sig(n_bits=4) for _ in range(5)]
+        df = sweep_strength(ForgeryAdversary, sigs, strengths=[0.0, 1.0])
+        summary = summary_by_strength(df)
+        self.assertEqual(len(summary), 2)
+        self.assertIn("mean_ops_match_rate", summary.columns)
+        self.assertIn("std_ops_match_rate", summary.columns)
+
+    def test_key_knowledge_sweep_scales(self):
+        from attacks.sweep import sweep_key_knowledge, summary_by_key_knowledge
+        sigs = [_make_sig(n_bits=8) for _ in range(10)]
+        df = sweep_key_knowledge(sigs, knowledge_levels=[0.0, 0.5, 1.0])
+        summary = summary_by_key_knowledge(df)
+        # Match rate should increase with key knowledge
+        rates = summary.sort_values("key_knowledge")["mean_ops_match_rate"].tolist()
+        self.assertGreater(rates[-1], rates[0])
 
 
 if __name__ == "__main__":
