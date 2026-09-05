@@ -1,4 +1,4 @@
-"""Streamlit dashboard. Track M5 (Yuvraj). Deliverable D5.
+"""Streamlit dashboard. Track M5 (Nikita). Deliverable D5.
 
 Renders DetectionResult and recomputes nothing. If the dashboard and the
 engine ever disagree you will find out live in front of a judge.
