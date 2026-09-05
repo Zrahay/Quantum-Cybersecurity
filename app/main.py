@@ -1,4 +1,4 @@
-"""Streamlit dashboard. Track M5 (Yuvraj). Deliverable D5.
+"""Streamlit dashboard. Track M5 (Nikita). Deliverable D5.
 
 Renders DetectionResult and recomputes nothing. If the dashboard and the
 engine ever disagree you will find out live in front of a judge.
@@ -6,8 +6,11 @@ engine ever disagree you will find out live in front of a judge.
 
 from __future__ import annotations
 
+import math
 import time
 
+import numpy as np
+import pandas as pd
 import streamlit as st
 
 from contracts import (
@@ -21,6 +24,12 @@ from attacks.replay import ReplayAdversary
 from attacks.forgery import ForgeryAdversary
 from attacks.channel_tamper import ChannelTamperAdversary
 from attacks.impersonation import ImpersonationAdversary
+from attacks.pns import PNSAdversary
+from attacks.collective import CollectiveAttackAdversary
+from attacks.faked_state import FakedStateAdversary
+from attacks.time_shift import TimeShiftAdversary
+from attacks.trojan_horse import TrojanHorseAdversary
+from attacks.mitm_classical import MitmClassicalAdversary
 from detection.detector import evaluate
 from detection.statistics import mismatch_rate
 from protocol import keygen, sign, verify, QDSConfig, M1QuantumCore
@@ -89,6 +98,12 @@ st.markdown("""
     .attack-forgery button { background: #dc3545 !important; border-color: #dc3545 !important; color: white !important; }
     .attack-channel_tamper button { background: #20c997 !important; border-color: #20c997 !important; color: white !important; }
     .attack-impersonation button { background: #fd7e14 !important; border-color: #fd7e14 !important; color: white !important; }
+    .attack-pns button { background: #0d6efd !important; border-color: #0d6efd !important; color: white !important; }
+    .attack-collective button { background: #6f42c1 !important; border-color: #6f42c1 !important; color: white !important; }
+    .attack-faked_state button { background: #6c757d !important; border-color: #6c757d !important; color: white !important; }
+    .attack-time_shift button { background: #ffc107 !important; border-color: #ffc107 !important; color: black !important; }
+    .attack-trojan_horse button { background: #8B4513 !important; border-color: #8B4513 !important; color: white !important; }
+    .attack-mitm_classical button { background: #fd7e14 !important; border-color: #fd7e14 !important; color: white !important; }
 
     /* Primary action */
     .sign-button button { background: #28a745 !important; border-color: #28a745 !important; font-size: 1.1rem !important; padding: 0.75rem 1.5rem !important; }
@@ -345,7 +360,7 @@ with st.sidebar:
     n_copies = st.number_input(
         "Copies (L)",
         min_value=1,
-        max_value=256,
+        max_value=128,
         value=st.session_state.config.n_copies,
         step=1,
         help="Number of signature copies per verifier, per message bit. Higher L = stronger security.",
@@ -554,15 +569,21 @@ def main() -> None:
         "Forgery": (ForgeryAdversary(strength=1.0), "🔴 Forgery", "attack-forgery", "Random Pauli ops, real teleportation outcomes"),
         "Channel Tamper": (ChannelTamperAdversary(strength=1.0), "🟢 Channel Tamper", "attack-channel_tamper", "Flips bell outcome bits in transit"),
         "Impersonation": (ImpersonationAdversary(claimed_identity=st.session_state.signer_id, strength=1.0), "🟠 Impersonation", "attack-impersonation", "Fabricates key_id + random ops/outcomes"),
+        "PNS": (PNSAdversary(strength=1.0), "🔵 PNS", "attack-pns", "Photon-number-splitting: intercepts k/L copies cleanly"),
+        "Collective": (CollectiveAttackAdversary(strength=0.5), "🟣 Collective", "attack-collective", "Joint measurement across L copies, entropy-based mismatch"),
+        "Faked-State": (FakedStateAdversary(strength=1.0), "⚪ Faked-State", "attack-faked_state", "Forces detector outcome, zero disturbance"),
+        "Time-Shift": (TimeShiftAdversary(strength=1.0), "🟡 Time-Shift", "attack-time_shift", "Exploits detector timing mismatch via timestamp"),
+        "Trojan-Horse": (TrojanHorseAdversary(strength=1.0), "🟤 Trojan-Horse", "attack-trojan_horse", "Learns ops via injected light, zero disturbance (hardware defence)"),
+        "MitM Classical": (MitmClassicalAdversary(strength=1.0), "🔶 MitM Classical", "attack-mitm_classical", "Tampers real announced ops in transit"),
     }
 
     # Create attack buttons and capture clicks immediately
-    atk_cols = st.columns(4, gap="medium")
+    atk_cols = st.columns(5, gap="medium")
     attack_clicked = None
     attack_adv = None
 
     for i, (label, (adv, display_label, css_class, tooltip)) in enumerate(attack_adversaries.items()):
-        with atk_cols[i]:
+        with atk_cols[i % 5]:
             st.markdown(f'<div class="{css_class}">', unsafe_allow_html=True)
             clicked = st.button(
                 display_label,
@@ -624,7 +645,18 @@ def main() -> None:
         with st.spinner(f"Launching {attack_clicked} attack..."):
             try:
                 tampered_sig = attack_adv.attack(st.session_state.last_signature)
-                result = _run_full_pipeline(tampered_sig)
+                # Channel tamper's real signal is through noise_level, not bell_outcomes.
+                # Check if the adversary reports a noise_level override.
+                nl_override = attack_adv.noise_level_override()
+                records = verify(
+                    tampered_sig, st.session_state.signer_key,
+                    noise_level=nl_override,
+                    core=st.session_state.quantum_core,
+                    config=st.session_state.config,
+                )
+                noise_floor = _calibrated_noise_floor(st.session_state.config)
+                result = evaluate(records, tampered_sig, st.session_state.seen_nonces, noise_floor=noise_floor)
+                st.session_state.seen_nonces.add(tampered_sig.nonce)
                 st.session_state.last_detection = result
                 _log_event(tampered_sig, result, attack_label=attack_clicked)
                 st.session_state.last_action = attack_clicked.lower().replace(" ", "_")
@@ -674,7 +706,6 @@ def main() -> None:
     st.markdown("### 📋 Event Log")
 
     if st.session_state.event_log:
-        import pandas as pd
         df = pd.DataFrame(st.session_state.event_log)
 
         # Column order
@@ -722,6 +753,128 @@ def main() -> None:
         st.dataframe(styled, use_container_width=True, hide_index=True, height=400)
     else:
         st.info("📭 No events yet. Sign a message or launch an attack to populate the log.")
+
+    # --- Evidence Panel: Plots ---
+    st.markdown("### 📈 Evidence")
+
+    tab1, tab2, tab3 = st.tabs(["Mismatch History", "Forgery Probability Curve", "Noise Sweep"])
+
+    with tab1:
+        if st.session_state.event_log:
+            log_df = pd.DataFrame(st.session_state.event_log)
+            log_df["mismatch_pct"] = log_df["mismatch"].str.rstrip("%").astype(float)
+            log_df["idx"] = range(len(log_df) - 1, -1, -1)
+
+            st.line_chart(
+                log_df.set_index("idx")["mismatch_pct"],
+                use_container_width=True,
+                height=300,
+                color="#dc3545",
+            )
+            st.caption("Mismatch rate per event (newest at top)")
+        else:
+            st.info("Sign a message or launch an attack to see the mismatch history.")
+
+    with tab2:
+        message_length_for_curve = 2
+        L_range = np.arange(8, 512, 8)
+        p_f = 1e-6
+        noise_floor = 0.0
+
+        def hoeffding_s_a(n, nf, pf):
+            if n <= 0:
+                return 1.0
+            margin = math.sqrt(-math.log(pf) / (2.0 * n))
+            return min(nf + margin, 1.0)
+
+        # K = message_length * L is the total elements a signature reveals;
+        # the number of CONCLUSIVE elements n is ~K/2 (see
+        # protocol/verifier.py's "STATE ELIMINATION" docstring).
+        s_a_values = [
+            hoeffding_s_a(int(message_length_for_curve * l / 2), noise_floor, p_f)
+            for l in L_range
+        ]
+
+        curve_df = pd.DataFrame({
+            "L": L_range,
+            "Acceptance Threshold (s_a)": s_a_values,
+        })
+
+        st.line_chart(
+            curve_df.set_index("L"),
+            use_container_width=True,
+            height=300,
+            color=["#28a745"],
+        )
+        st.caption("Hoeffding-derived acceptance threshold vs L (message_length=2). Forgery probability ≤ 10⁻⁶")
+
+        # Mark current L, using the ACTIVE key's real message_length and the
+        # real measured noise floor (not the curve's illustrative message_length=2
+        # / ideal-channel assumptions) so this number matches the threshold
+        # evaluate() actually used on the last signature -- CLAUDE.md: s_a/s_v
+        # are derived from the measured noise floor and p_f, never hardcoded.
+        current_L = st.session_state.config.n_copies
+        current_message_length = st.session_state.message_length
+        current_noise_floor = _calibrated_noise_floor(st.session_state.config)
+        current_n = int(current_message_length * current_L / 2)
+        current_s_a = hoeffding_s_a(current_n, current_noise_floor, p_f)
+        st.metric("Current L", current_L, help="Your active signature copies")
+        st.metric(
+            "Current s_a", f"{current_s_a:.3f}",
+            help=(
+                f"Acceptance threshold at this L, using the active key's "
+                f"message_length={current_message_length} and measured noise "
+                f"floor={current_noise_floor:.3f} -- matches the threshold "
+                f"evaluate() actually applies, not the illustrative curve above."
+            ),
+        )
+
+    with tab3:
+        sweep_L = st.session_state.config.n_copies
+        sweep_bases = st.session_state.config.bases
+        sweep_cache = st.session_state.setdefault("_noise_sweep_cache", {})
+        sweep_cache_key = (sweep_L, sweep_bases)
+
+        if sweep_cache_key not in sweep_cache:
+            noise_levels = np.linspace(0.0, 1.0, 11)
+            measured_mismatch = []
+            sweep_core = M1QuantumCore()
+            for nl in noise_levels:
+                sweep_config = QDSConfig(
+                    n_copies=sweep_L,
+                    noise_level=float(nl),
+                    bases=sweep_bases,
+                )
+                sweep_key = keygen(
+                    "_noise_sweep", sweep_L, message_length=1,
+                    core=sweep_core, config=sweep_config,
+                )
+                sweep_sig = sign((0,), sweep_key, core=sweep_core, config=sweep_config)
+                sweep_records = verify(sweep_sig, sweep_key, core=sweep_core, config=sweep_config)
+                measured_mismatch.append(
+                    mismatch_rate(sweep_records) * 100 if sweep_records else 0.0
+                )
+            sweep_cache[sweep_cache_key] = (noise_levels, measured_mismatch)
+
+        noise_levels, measured_mismatch = sweep_cache[sweep_cache_key]
+
+        sweep_df = pd.DataFrame({
+            "Noise Level": [f"{nl:.0%}" for nl in noise_levels],
+            "Measured Mismatch (%)": measured_mismatch,
+        })
+
+        st.line_chart(
+            sweep_df.set_index("Noise Level"),
+            use_container_width=True,
+            height=300,
+            color=["#ffc107"],
+        )
+        st.caption(
+            f"Empirically measured mismatch rate vs channel noise level "
+            f"(L={sweep_L}, one throwaway keygen/sign/verify per point). "
+            "noise_level is a depolarising-channel dial, not the mismatch "
+            "rate itself -- see _calibrated_noise_floor()."
+        )
 
     # --- Footer ---
     st.markdown("---")
