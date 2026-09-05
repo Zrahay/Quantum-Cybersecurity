@@ -9,27 +9,35 @@ arXiv:0105104 (2001).
 
 Instead of a single per-element measurement, Eve applies a JOINT
 operation across all L copies to extract maximum information before
-guessing.  The information-theoretic bound says Eve's information per
-element is bounded by the Holevo quantity χ ≤ S(ρ) - Σ p_i S(ρ_i),
-which for BB84 states gives a maximum extractable information that
-produces a MINIMUM mismatch rate of approximately 0.25 at full
-strength (random guess) and scales with Eve's information gain.
+guessing. The information-theoretic bound says Eve's information per
+element is bounded by the Holevo quantity χ ≤ S(ρ) - Σ p_i S(ρ_i).
 
-This is a graded generalisation of the existing ForgeryAdversary:
-same mechanics (Eve has no key), but the mismatch rate follows the
-ENTROPY BOUND from the paper rather than pure random.choice.  When
-Eve has partial information (from prior interception, side channels,
-etc.), her mismatch rate is:
+``strength`` (0.0-1.0) is Eve's information advantage: the fraction of
+elements she can predict correctly from the joint measurement, keeping
+those and guessing the rest. At 0.0 this is exactly ForgeryAdversary
+(zero information, mismatch rate ~0.20-0.28 empirically -- see
+`detection/detector.py`'s `_reject_reason_and_threat` docstring for
+where that figure comes from). At 1.0 she reproduces the signature
+exactly (mismatch rate 0.0). Note this is the record-level mismatch
+rate `evaluate()` measures after `verify()`'s basis-agreement
+filtering, not a raw ops-comparison stat -- the two are different
+quantities and the latter is roughly 3x the former in this codebase.
 
-    mismatch_rate ≈ (1 - information) * 0.25
-
-because she matches perfectly on the fraction she knows and guesses
-randomly on the rest.
-
-``strength`` controls Eve's information advantage (0.0 = no info,
-1.0 = full info = legitimate signature).  At 0.0 this is equivalent
-to ForgeryAdversary.  At intermediate values the mismatch rate
-follows the graded curve from the collective attack bound.
+HONEST NOTE ON WHAT THIS SIMULATION CAN AND CANNOT DISTINGUISH: the
+distinguishing feature from PNS in the literature is *how* Eve gets her
+partial information (a joint measurement across L copies vs. splitting
+photons one at a time) and *which* elements she ends up knowing (global
+key correlations here vs. specific intercepted copies for PNS) — not a
+different statistical footprint. This adversary and PNSAdversary both
+model "know a `strength`-fraction of elements exactly, guess the rest",
+because that is what `evaluate()` can actually see: a mismatch rate,
+compared against s_a/s_v (see `detection/detector.py`). Neither
+`verify()` nor `evaluate()` inspects *which* positions mismatch or the
+shape of the bell_outcomes distribution, so a claim that chi-square
+tells Collective and PNS apart here would be false — both attacks are
+reported identically, as FORGERY, on mismatch rate alone. The physical
+distinction between the two attack mechanisms belongs in the D1 writeup
+as a conceptual point, not as a live discriminator in this codebase.
 
 No AI/ML is used.
 """
@@ -47,43 +55,20 @@ class CollectiveAttackAdversary(BaseAdversary):
     """Collective attack: Eve applies a joint measurement across L copies
     to extract information, then forges with that knowledge.
 
-    ``strength`` (0.0–1.0) controls Eve's information advantage:
-    - 0.0: zero information → equivalent to ForgeryAdversary
-      (mismatch ≈ 0.25)
-    - 0.5: partial info → mismatch ≈ 0.125
-    - 1.0: full information → mismatch ≈ 0.0 (legitimate signature)
+    ``strength`` (0.0-1.0) controls Eve's information advantage:
+    - 0.0: zero information -> equivalent to ForgeryAdversary
+      (mismatch rate ~0.20-0.28, this codebase's measured blind-forgery
+      rate -- see module docstring)
+    - 1.0: full information -> mismatch rate 0.0 (legitimate signature)
+    - intermediate: mismatch rate scales roughly with (1 - strength),
+      scaled to the ~0.25 baseline above rather than a clean formula --
+      she matches perfectly on the fraction she knows and inherits the
+      blind-forgery rate on the rest.
 
-    The key difference from ForgeryAdversary:
-    - ForgeryAdversary randomises ALL ops (Eve has zero info)
-    - This adversary randomises only the ops Eve DOESN'T know,
-      keeping the ones she extracted via collective measurement
-
-    The mismatch rate follows: (1 - strength) * 0.25
-    because:
-    - strength fraction of ops are correct (Eve knows them)
-    - (1 - strength) fraction are random (25% match by chance)
-    - Total match rate: strength * 1.0 + (1 - strength) * 0.25
-    - Mismatch rate: 1 - match_rate = (1 - strength) * 0.75
-    Wait — that's the same as PNS. Let me reconsider.
-
-    Actually, the collective attack operates differently from PNS:
-    Eve performs a JOINT measurement on all L copies simultaneously,
-    extracting the maximum classical information possible from the
-    quantum states.  The Holevo bound limits this to at most 1 bit
-    per pair of copies (for BB84).  With L copies, Eve can extract
-    information about the KEY (not just individual elements) that
-    lets her predict ops more accurately than random guessing.
-
-    The practical effect: Eve's ops are CORRELATED with the real ops
-    at a rate determined by her information, not independently random.
-    This means the mismatch distribution across elements is UNIFORM
-    (unlike PNS where intercepted positions always match), but the
-    overall rate is lower than blind forgery.
-
-    Detection signal:
-    - Mismatch rate: (1 - strength) * 0.75, same as PNS numerically
-    - Chi-square: uniform distribution (unlike PNS's non-uniform)
-    - The uniformity is the distinguishing feature from PNS
+    Detection signal: mismatch rate compared against s_a/s_v, same
+    mechanism as every other adversary here -- see this module's
+    docstring for why a claim of a distinguishing chi-square signature
+    against PNS would be false in this codebase.
     """
 
     threat = ThreatType.FORGERY
@@ -92,14 +77,7 @@ class CollectiveAttackAdversary(BaseAdversary):
         n = len(sig.declared_ops)
 
         # Eve's information determines how many ops she can predict.
-        # With full collective measurement she extracts information
-        # about the key, not individual elements — but the EFFECT is
-        # that she knows the correct op for `n_known` elements.
         n_known = round(n * self.strength)
-
-        # Which ops Eve knows: she keeps the real ones.
-        # Unlike PNS, these are chosen UNIFORMLY at random across all
-        # positions (joint measurement gives global info, not local).
         known_indices = set(random.sample(range(n), n_known))
 
         forged_ops = tuple(
@@ -110,6 +88,10 @@ class CollectiveAttackAdversary(BaseAdversary):
 
         # Bell outcomes: Eve guesses randomly (she doesn't have the
         # real quantum states — she only extracted classical info).
+        # Note: `verify()` never reads `bell_outcomes` back off the
+        # signature (it re-measures independently), so this field has
+        # no effect on the detection outcome. Kept for structural
+        # completeness of the Signature.
         forged_outcomes = tuple(
             (random.randint(0, 1), random.randint(0, 1))
             for _ in range(n)

@@ -8,33 +8,33 @@ coherent states", Phys. Rev. A 78, 052325 (2008) — detector timing
 mismatch exploitation.
 
 Eve exploits detector timing/efficiency mismatch by shifting photon
-arrival time, biasing which outcome gets recorded without touching
-the quantum state itself.
+arrival time, biasing which outcome the verifier's detector registers
+without touching the quantum state Alice sent.
 
-Model: Eve perturbs the ``timestamp`` field and introduces a
-systematic bias in the ``bell_outcomes`` distribution.  The
-timestamp shift models the timing attack (Eve delays or advances
-photons to exploit detector dead time or afterpulsing), and the
-biased bell_outcomes model the resulting detector efficiency mismatch.
+HONEST NOTE ON WHAT THIS SIMULATION CAN AND CANNOT SHOW: real
+detector-timing exploitation would need a timing model inside
+`core.teleport_and_measure`, which this simulation does not have.
+`protocol/verifier.py::verify()` never reads `sig.bell_outcomes` or
+`sig.timestamp` back off the signature at all — only `declared_ops` is
+checked. So the earlier version of this adversary (which left
+`declared_ops` untouched and only perturbed the unread fields) was
+undetectable by construction, but not for the reason the physics
+suggests — it would have been undetectable *because it never actually
+attacked anything checkable*, which is a different claim than "defeats
+timing-based detection".
 
-``strength`` controls the magnitude of the time shift (0.0 = no
-shift, 1.0 = maximum shift).  The bell_outcomes bias scales with
-strength: at full strength, one outcome combination (e.g., (0,0))
-becomes significantly more probable than the others.
+What is modelled here instead: an efficiency mismatch that causes the
+verifier's detector to occasionally misattribute the basis it measured
+in, which surfaces as a `strength`-proportional fraction of `declared_ops`
+disagreeing with what a legitimate signer would have declared for those
+elements. That IS visible to `verify()`/`evaluate()`, through the same
+mismatch-rate-vs-threshold mechanism as every other adversary here — not
+via `bell_outcomes` bias or a timestamp check (`evaluate()` does not
+inspect timestamp freshness; that would be a `detection/detector.py`
+change, out of scope for this file).
 
-Detection signals:
-- Timestamp outside normal range (classical check).
-- Bell_outcomes distribution is biased (chi-square detects
-  non-uniformity across the four possible outcomes).
-- This is caught by the SAME chi-square test that catches
-  faked-state attacks, but the mechanism is different: faked-state
-  correlates outcomes with ops, time-shift biases outcomes globally.
-
-Why this matters:
-Your Signature already has a ``timestamp`` field sitting unused for
-attack purposes — this is a direct, clean use of it.  Time-shift
-attacks are a real vulnerability in practical QKD systems where
-detectors have timing-dependent efficiency.
+``strength`` controls the fraction of elements affected (0.0 = no
+effect, 1.0 = fully corrupted).
 
 No AI/ML is used.
 """
@@ -45,75 +45,56 @@ import random
 import uuid
 
 from attacks.base import BaseAdversary
-from contracts import Signature, ThreatType
+from contracts import PauliOp, Signature, ThreatType
 
-
-# Maximum time shift in seconds (model parameter).
+# Maximum time shift in seconds (model parameter, carried on the
+# signature for a future timestamp-freshness check — not currently
+# consumed by `evaluate()`).
 _MAX_TIME_SHIFT = 10.0
 
 
 class TimeShiftAdversary(BaseAdversary):
-    """Time-shift attack: bias bell_outcomes via detector timing exploit.
+    """Time-shift attack: detector efficiency mismatch corrupts a fraction
+    of the declared bases the verifier ends up comparing against.
 
     The returned ``Signature`` has:
     - ``timestamp`` shifted by ``strength * _MAX_TIME_SHIFT`` seconds
-      (forward or backward randomly).
-    - ``bell_outcomes`` with a systematic bias: one outcome
-      combination is ``strength``-times more likely than the others.
-    - Original ``declared_ops`` (Eve doesn't need to change them —
-      the timing exploit affects detection, not the declaration).
+      (forward or backward randomly) — carried for a possible future
+      freshness check, not consumed by the current detection path.
+    - ``declared_ops`` with a ``strength``-fraction of elements replaced
+      by a random Pauli op, modelling the elements where the timing
+      exploit caused a basis misattribution.
 
-    Detection signals:
-    - Timestamp anomaly: the shifted timestamp may fall outside the
-      freshness window, triggering a freshness check failure.
-    - Biased bell_outcomes: chi-square goodness-of-fit detects that
-      the four outcome combinations are not equally likely.  A
-      legitimate signer's bell_outcomes come from Bell pair symmetry,
-      which produces all four combinations with equal probability.
-    - The bias pattern is characteristic: one outcome dominates,
-      unlike channel tampering (which flips outcomes randomly) or
-      forgery (which has no correlation between ops and outcomes).
-
-    Why this matters:
-    Time-shift attacks exploit a PHYSICAL property of single-photon
-    detectors — their efficiency varies with arrival time.  By
-    shifting when photons arrive, Eve can bias which detector clicks
-    without introducing errors.  This is a real vulnerability in
-    deployed QKD systems, and modelling it here demonstrates that
-    our detection framework catches timing-based attacks, not just
-    error-rate-based ones.
+    Detection signal: mismatch rate vs. s_a/s_v, same mechanism as
+    every other adversary here — see the module docstring for why a
+    claim of detection via `bell_outcomes` bias or timestamp checking
+    would be false in this codebase.
     """
 
     threat = ThreatType.FORGERY
 
     def attack(self, sig: Signature) -> Signature:
-        n = len(sig.bell_outcomes)
+        n = len(sig.declared_ops)
 
-        # Timestamp shift: Eve delays or advances the signature.
         shift = self.strength * _MAX_TIME_SHIFT
         if random.random() < 0.5:
             shift = -shift
         shifted_timestamp = sig.timestamp + shift
 
-        # Bell outcomes bias: one combination becomes dominant.
-        # The "favored" outcome is chosen randomly per attack.
-        favored = random.choice([(0, 0), (0, 1), (1, 0), (1, 1)])
-        biased_outcomes: list[tuple[int, int]] = []
-        for _ in range(n):
-            if random.random() < self.strength:
-                # Eve's timing exploit forces this outcome.
-                biased_outcomes.append(favored)
-            else:
-                # Random outcome (untouched by timing exploit).
-                biased_outcomes.append((random.randint(0, 1), random.randint(0, 1)))
+        n_corrupted = max(0, round(n * self.strength))
+        corrupted_indices = set(random.sample(range(n), n_corrupted))
+        forged_ops = tuple(
+            random.choice(list(PauliOp)) if i in corrupted_indices else op
+            for i, op in enumerate(sig.declared_ops)
+        )
 
         return Signature(
-            sig_id=sig.sig_id,
+            sig_id=f"timeshift-{uuid.uuid4().hex[:8]}",
             key_id=sig.key_id,
             signer_id=sig.signer_id,
             message=sig.message,
-            declared_ops=sig.declared_ops,
-            bell_outcomes=tuple(biased_outcomes),
+            declared_ops=forged_ops,
+            bell_outcomes=sig.bell_outcomes,
             nonce=uuid.uuid4().hex,
             timestamp=shifted_timestamp,
         )

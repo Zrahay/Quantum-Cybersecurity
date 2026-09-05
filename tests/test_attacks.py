@@ -199,17 +199,20 @@ class TestChannelTamper(unittest.TestCase):
         # With 32 pairs all targeted, at least one should differ
         self.assertNotEqual(result.bell_outcomes, sig.bell_outcomes)
 
-    @unittest.skip("Flaky: 2 bits at 50% flip has ~0.3% chance of zero preserves in 20 trials")
     def test_partial_strength(self):
-        """strength=0.5 with a short message should sometimes preserve."""
+        """strength=0.5 with a short message should sometimes preserve.
+
+        2 bits at 50% flip gave a ~0.3% false-failure rate at 20 trials
+        (all 20 disturbing by chance). 200 trials pushes that below
+        1e-30 -- fixes the flakiness instead of skipping the test.
+        """
         sig = _make_sig(n_bits=2)
         adv = ChannelTamperAdversary(strength=0.5)
         preserved = 0
-        for _ in range(20):
+        for _ in range(200):
             result = adv.attack(sig)
             if result.bell_outcomes == sig.bell_outcomes:
                 preserved += 1
-        # With 2 bits at 50% flip rate, some trials should preserve
         self.assertGreater(preserved, 0)
 
     def test_ops_preserved(self):
@@ -367,6 +370,138 @@ class TestRunBatch(unittest.TestCase):
         self.assertTrue((df["ops_match_rate"] <= 1.0).all())
         self.assertTrue((df["outcomes_match_rate"] >= 0.0).all())
         self.assertTrue((df["outcomes_match_rate"] <= 1.0).all())
+
+
+# ── PNS, Collective, Faked-state, Time-shift, Trojan-horse, MitM ─────────
+#
+# These six all satisfy the same BaseAdversary protocol already covered by
+# TestAdversaryProtocol above -- these tests cover what's actually distinct
+# about each one's `attack()` implementation.
+
+from attacks.collective import CollectiveAttackAdversary
+from attacks.faked_state import FakedStateAdversary
+from attacks.mitm_classical import MitmClassicalAdversary
+from attacks.pns import PNSAdversary
+from attacks.time_shift import TimeShiftAdversary
+from attacks.trojan_horse import TrojanHorseAdversary
+
+
+class TestPNS(unittest.TestCase):
+    def test_full_strength_reproduces_ops_exactly(self):
+        sig = _make_sig(n_bits=16)
+        result = PNSAdversary(strength=1.0).attack(sig)
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_zero_strength_randomises_all_ops(self):
+        sig = _make_sig(n_bits=32)
+        result = PNSAdversary(strength=0.0).attack(sig)
+        matches = sum(1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f)
+        # Same ballpark as blind forgery: ~25% match by chance.
+        self.assertLess(matches, 16)
+
+    def test_partial_strength_keeps_only_intercepted_ops(self):
+        sig = _make_sig(n_bits=40)
+        result = PNSAdversary(strength=0.5).attack(sig)
+        matches = sum(1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f)
+        # ~20 ops kept exactly + ~25% chance match on the other ~20.
+        self.assertGreater(matches, 15)
+        self.assertLess(matches, 40)
+
+
+class TestCollective(unittest.TestCase):
+    def test_full_strength_reproduces_ops_exactly(self):
+        sig = _make_sig(n_bits=16)
+        result = CollectiveAttackAdversary(strength=1.0).attack(sig)
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_message_and_key_id_preserved(self):
+        sig = _make_sig(n_bits=8)
+        result = CollectiveAttackAdversary(strength=0.5).attack(sig)
+        self.assertEqual(result.message, sig.message)
+        self.assertEqual(result.key_id, sig.key_id)
+
+
+class TestFakedState(unittest.TestCase):
+    def test_forced_outcomes_correlate_with_declared_ops(self):
+        sig = _make_sig(n_bits=20)
+        result = FakedStateAdversary(strength=1.0).attack(sig)
+        from attacks.faked_state import _PAULI_TO_FORCED_OUTCOME
+        for op, outcome in zip(result.declared_ops, result.bell_outcomes):
+            self.assertEqual(outcome, _PAULI_TO_FORCED_OUTCOME[op])
+
+    def test_declared_ops_are_random_not_derived_from_key(self):
+        """Eve has no key material -- ops must still be randomised, since
+        that (not bell_outcomes, which verify() never reads) is what
+        actually drives the mismatch rate. Regression guard against
+        reintroducing the PR's original false "defeats mismatch-rate
+        detection" premise.
+        """
+        sig = _make_sig(n_bits=32)
+        r1 = FakedStateAdversary(strength=1.0).attack(sig)
+        r2 = FakedStateAdversary(strength=1.0).attack(sig)
+        self.assertNotEqual(r1.declared_ops, r2.declared_ops)
+
+
+class TestTimeShift(unittest.TestCase):
+    def test_zero_strength_preserves_ops(self):
+        sig = _make_sig(n_bits=16)
+        result = TimeShiftAdversary(strength=0.0).attack(sig)
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_full_strength_corrupts_declared_ops(self):
+        """Regression guard: an earlier version of this adversary left
+        declared_ops untouched entirely, which verify() never checks
+        against bell_outcomes/timestamp -- making the attack silently
+        undetectable for the wrong reason. declared_ops must actually
+        change for this to be a real, checkable attack.
+        """
+        sig = _make_sig(n_bits=32)
+        result = TimeShiftAdversary(strength=1.0).attack(sig)
+        self.assertNotEqual(result.declared_ops, sig.declared_ops)
+
+    def test_timestamp_is_shifted(self):
+        sig = _make_sig(n_bits=8)
+        result = TimeShiftAdversary(strength=1.0).attack(sig)
+        self.assertNotEqual(result.timestamp, sig.timestamp)
+
+
+class TestTrojanHorse(unittest.TestCase):
+    def test_signature_unchanged_except_nonce(self):
+        sig = _make_sig(n_bits=8)
+        result = TrojanHorseAdversary(strength=1.0).attack(sig)
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+        self.assertEqual(result.bell_outcomes, sig.bell_outcomes)
+        self.assertNotEqual(result.nonce, sig.nonce)
+
+    def test_learned_count_scales_with_strength(self):
+        sig = _make_sig(n_bits=20)
+        adv = TrojanHorseAdversary(strength=0.5)
+        adv.attack(sig)
+        self.assertEqual(adv.learned_count, 10)
+
+
+class TestMitmClassical(unittest.TestCase):
+    def test_bell_outcomes_unchanged(self):
+        sig = _make_sig(n_bits=16)
+        result = MitmClassicalAdversary(strength=0.5).attack(sig)
+        self.assertEqual(result.bell_outcomes, sig.bell_outcomes)
+
+    def test_key_id_and_signer_id_unchanged(self):
+        sig = _make_sig(n_bits=8)
+        result = MitmClassicalAdversary(strength=1.0).attack(sig)
+        self.assertEqual(result.key_id, sig.key_id)
+        self.assertEqual(result.signer_id, sig.signer_id)
+
+    def test_zero_strength_preserves_ops(self):
+        sig = _make_sig(n_bits=16)
+        result = MitmClassicalAdversary(strength=0.0).attack(sig)
+        self.assertEqual(result.declared_ops, sig.declared_ops)
+
+    def test_full_strength_randomises_ops(self):
+        sig = _make_sig(n_bits=32)
+        result = MitmClassicalAdversary(strength=1.0).attack(sig)
+        matches = sum(1 for o, f in zip(sig.declared_ops, result.declared_ops) if o == f)
+        self.assertLess(matches, 16)
 
 
 if __name__ == "__main__":

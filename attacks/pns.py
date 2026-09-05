@@ -17,16 +17,27 @@ copies.
 ``strength`` controls the fraction of copies Eve successfully splits
 (0.0 = no PNS, 1.0 = Eve intercepts all copies).  At full strength
 Eve has perfect information on every element — she can reproduce the
-signature exactly, so mismatch rate → 0.  At partial strength the
-mismatch rate scales as ``(1 - strength) * 0.75`` because the
-un-intercepted copies are guessed randomly (25% match by chance).
+signature exactly, so mismatch rate → 0.  At zero strength this is
+ForgeryAdversary's blind-guess case, whose measured mismatch rate in
+this codebase is ~0.20-0.28 (see `detection/detector.py`'s
+`_reject_reason_and_threat` docstring), not the naive 0.75 raw
+ops-comparison figure -- `verify()`'s basis-agreement filtering means
+only a fraction of guessed elements are even conclusive, and of those
+only a further fraction actually mismatch. At intermediate strength
+the mismatch rate scales down from that ~0.25 baseline roughly with
+(1 - strength).
 
 Detection signal: zero disturbance on intercepted copies means the
 mismatch rate is LOWER than a blind forgery, not higher.  This attack
-is caught by the SAME threshold that catches forgery, but at a lower
-mismatch rate — which is exactly the point: PNS is the attack that
-motivates making L large enough that even partial interception
-leaves detectable evidence.
+is caught by the SAME mismatch-rate-vs-threshold mechanism as forgery,
+just at a lower rate — which is exactly the point: PNS is the attack
+that motivates making L large enough that even partial interception
+leaves detectable evidence. (`evaluate()`'s chi-square test checks the
+match/mismatch count against the noise floor, not which positions
+mismatch, so telling PNS apart from a partial-strength forgery by
+"which elements disagree" is a D1-writeup point, not something this
+engine computes live — see `attacks/collective.py`'s docstring for the
+same caveat.)
 
 No AI/ML is used.
 """
@@ -51,12 +62,11 @@ class PNSAdversary(BaseAdversary):
       them untouched — zero disturbance on the copies she keeps).
     - Fresh ``nonce`` and ``sig_id`` (Eve resubmits, not replay).
 
-    Detection signals:
-    - Mismatch rate is ``(1 - strength) * 0.75`` — lower than blind
-      forgery's ~0.25 because intercepted copies match perfectly.
-    - The chi-square goodness-of-fit test detects that the mismatch
-      distribution is non-uniform: intercepted positions always match,
-      non-intercepted always mismatch.
+    Detection signal:
+    - Mismatch rate scales down from blind forgery's ~0.20-0.28
+      baseline as strength grows, because intercepted copies match
+      perfectly. Caught the same way as forgery, against s_a/s_v — not
+      via a chi-square distribution shape (see module docstring).
 
     Why this matters for the security argument:
     PNS is the attack that forces the L-copy design.  If L is small,
